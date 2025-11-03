@@ -1,4 +1,4 @@
-# Landmark‑ID (Vilnius Commons) – Team Documentation [EN]
+# Landmark‑ID – Team Documentation [EN]
 ---
 
 ## 0) Task Description 
@@ -11,18 +11,12 @@ Implement a landmark identification app.
 * **MVP flow:** Camera → single frame → **TFLite (INT8)** model → **Top‑3** predictions on screen
 * **Backbone:** `MobileNetV3‑Small` (transfer learning)
 * **Stack:** Python 3.11, TensorFlow 2.16.1, Keras 3, Weights & Biases (W&B) 0.22.1
-* **Data source:** Wikimedia Commons (5 Vilnius landmarks)
-* **Classes:**
-
-    * `gediminas_tower`
-    * `vilnius_cathedral`
-    * `gate_of_dawn`
-    * `st_anne`
-    * `three_crosses`
+* **Data source:** Google Landmarks Dataset v2 (Lithuania subset, dynamically selected top classes)
+* **Classes:** depends on current GLDv2 query (configurable `top-n`)
 
 **Definition of Done (Sprint 1):**
 
-* Test set **Top‑1 ≥ 75%** ✅ (observed val_top1 ~ **77–78%**)
+* Test set **Top‑1 ≥ 75%**
 * Model size **≤ 15–20 MB** (INT8 target)
 * Training is reproducible (**seed=42**)
 * Training/experiments logged in **W&B**
@@ -33,20 +27,20 @@ Implement a landmark identification app.
 
 ```
 landmark-id/
-  data/
-    raw/                   # downloaded raw images (Commons)
-    train/ val/ test/      # post-split folders
-    SOURCES.csv            # license/attribution metadata
-  models/                  # .keras and .tflite outputs
-  reports/                 # metric reports + confusion matrix
-  scripts/
-    fetch_commons_requests.py   # robust downloader via MediaWiki API
+  data/                     # generated metadata + splits (metadata.json, train/val/test txt)
+  models/                   # .keras checkpoints / exports
+  reports/                  # metric reports + confusion matrix
   src/
-    data/split.py               # 70/15/15 split
-    data/log_dataset_wandb.py   # W&B Artifact (dataset)
-    models/train_keras_wandb.py # training + W&B logging
-    models/eval_and_report.py   # test & report (CM, class-wise)
-  .venv/                        # local virtual environment
+    GLDV2_ds/               # GLDv2 ingestion + TF dataset helpers
+      query_gld_v2.py       # discover Lithuanian landmarks + image counts
+      fetch_metadata.py     # download per-landmark image metadata + balance classes
+      create_split.py       # emit train/val/test txt files
+      gldv2_dataset.py      # TF streaming dataset loader
+    model/
+      train_keras_wandb.py  # training + W&B logging
+      eval_and_report.py    # test & report (CM, class-wise)
+      export_tflite.py      # model export utilities
+  .venv/                    # local virtual environment (optional)
 ```
 
 ---
@@ -80,36 +74,32 @@ wandb login
 
 ## 4) Data Collection & Preparation
 
-### 4.1 Download (Wikimedia Commons)
-
-* Script: `scripts/fetch_commons_requests.py`
-* Features: custom **User‑Agent**, **retry/backoff**, 429/5xx handling, minimum image size filter, and license/attribution written to `SOURCES.csv`.
-
-**Run:**
+### 4.1 Discover top Lithuanian landmarks (GLDv2)
 
 ```bash
-python scripts/fetch_commons_requests.py --max-per-class 120 --min-size 400
+python src/GLDV2_ds/query_gld_v2.py --out-dir data --top-n 100
 ```
 
-### 4.2 Train/Val/Test Split (70/15/15)
+* Downloads `data/gldv2_lithuania.json` (country index) and queries each landmark’s image count.
+* Produces `data/gldv2_lithuania_labels_filtered.csv` + `data/gldv2_lithuania_stats.json` with sorted counts.
+
+### 4.2 Fetch per-landmark image metadata
 
 ```bash
-python src/data/split.py
+python src/GLDV2_ds/fetch_metadata.py --filtered-csv data/gldv2_lithuania_labels_filtered.csv --out-dir data --top-n 53 --images-per-class balanced
 ```
 
-**Example counts (one run):**
+* Maps landmark names to GLDv2 IDs and downloads `landmarks/<id>.json` blobs.
+* Builds `data/metadata.json` containing image IDs + URLs per class (balanced sampling optional).
 
-* Train: **378** images / 5 classes
-* Val: **81** images / 5 classes
-* Test: **83** images / 5 classes
-
-### 4.3 Log dataset to W&B (Artifact)
+### 4.3 Create train/val/test splits
 
 ```bash
-python src/data/log_dataset_wandb.py
+python src/GLDV2_ds/create_split.py --metadata data/metadata.json --out-dir data --train-ratio 0.7 --val-ratio 0.15
 ```
 
-> You should see a `vilnius-landmarks-mini` dataset artifact in your W&B project.
+* Writes `data/train.txt`, `data/val.txt`, `data/test.txt` with `landmark_name,image_id` pairs.
+* All downstream loaders stream images on-the-fly using these splits.
 
 ---
 
@@ -119,44 +109,38 @@ python src/data/log_dataset_wandb.py
 
 * Backbone: `MobileNetV3Small(weights="imagenet", include_top=False)`
 * Optimizer: `AdamW(lr=1e-3, weight_decay=1e-4)`
-* Augment: flip, zoom, brightness
+* Augment: flip, zoom, brightness, contrast
 * Metrics: `top1`, `top3`
-* Callbacks: `EarlyStopping(monitor=val_top1, patience=5, restore_best_weights=True)`, `WandbMetricsLogger`
-* Checkpoint: **Keras `ModelCheckpoint`** (writes only on best `val_top1`)
+* Class balancing: inverse-frequency `class_weight`
+* Checkpoint: `ModelCheckpoint(filepath="models/ckpt_{epoch:02d}_{val_loss:.3f}.keras", save_best_only=True)`
 
 **Train:**
 
 ```bash
-python src/models/train_keras_wandb.py
+python src/model/train_keras_wandb.py
 ```
-
-> Note: Using the new W&B Keras API (`wandb.integration.keras`). The legacy `WandbCallback` graph logging was removed due to Keras 3 incompatibility.
 
 ### 5.2 Fine‑tuning
 
-* Strategy: unfreeze **~last 30 layers**, retrain at **LR = 1e‑5** for ~8 epochs
-* Rationale: typically adds **+3–8 points** on small datasets
-
-**Observed result (example):**
-
-* Val **Top‑1 ≈ 77–78%**
-* Val **Top‑3 ≈ 96–98%**
+* Strategy: unfreeze backbone, keep BatchNorm frozen, train final ~15 layers
+* Optimizer: `AdamW(lr=3e-6, weight_decay=0)` + label smoothing (0.05)
+* ReduceLROnPlateau callback for stability
 
 ---
 
 ## 6) Evaluation & Reporting
 
-* Script: `src/models/eval_and_report.py`
+* Script: `src/model/eval_and_report.py`
 * Produces:
 
     * `reports/confusion_matrix.csv`
     * `reports/sprint1_metrics.md` (Top‑1/Top‑3 + per‑class precision/recall/F1)
-* W&B: run charts, class‑wise metrics, confusion matrix image
+* Uses the same GLDv2 streaming dataset as training (`get_tf_datasets`)
 
 **Run:**
 
 ```bash
-python src/models/eval_and_report.py
+python src/model/eval_and_report.py
 ```
 
 ---
@@ -192,9 +176,9 @@ import wandb
 run = wandb.init(project="landmark-id", job_type="export")
 a = wandb.Artifact("landmark-mnv3-tflite", type="model",
                    description="Vilnius 5-class, FP32+INT8 export")
-a.add_file("models/landmark_mnv3_fp32.tflite")
-a.add_file("models/landmark_mnv3_int8.tflite")
-wandb.log_artifact(a); run.finish()
+    a.add_file("models/landmark_mnv3_fp32.tflite")
+    a.add_file("models/landmark_mnv3_int8.tflite")
+    wandb.log_artifact(a); run.finish()
 PY
 ```
 

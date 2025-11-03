@@ -3,10 +3,11 @@ from tensorflow import keras
 from sklearn.metrics import confusion_matrix, classification_report
 from pathlib import Path
 
+from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
+
 IMG=(224,224); SEED=42; BATCH=32
-test_ds = keras.preprocessing.image_dataset_from_directory(
-  "data/test", image_size=IMG, batch_size=BATCH, seed=SEED, shuffle=False, label_mode="categorical")
-classes = test_ds.class_names
+test_ds, class_names = get_tf_datasets("test", img_size=IMG[0], batch=BATCH, seed=SEED)
+classes = sorted(class_names)
 test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
 
 model = keras.models.load_model("models/landmark_mnv3.keras")
@@ -18,7 +19,7 @@ model.compile(
         keras.metrics.TopKCategoricalAccuracy(k=3, name="top3"),
     ],
 )
-res = model.evaluate(test_ds, verbose=0)
+res = dict(zip(model.metrics_names, model.evaluate(test_ds, verbose=0)))
 
 y_true,y_pred=[],[]
 for bx,by in test_ds:
@@ -33,7 +34,7 @@ Path("reports").mkdir(parents=True, exist_ok=True)
 np.savetxt("reports/confusion_matrix.csv", cm, fmt="%d", delimiter=",")
 with open("reports/sprint1_metrics.md","w",encoding="utf-8") as f:
   f.write("# Sprint 1 – Metrics (Vilnius Commons)\n\n")
-  f.write(f"- Test Top-1: **{res[1]:.3f}**\n- Test Top-3: **{res[2]:.3f}**\n")
+  f.write(f"- Test Top-1: **{res['top1']:.3f}**\n- Test Top-3: **{res['top3']:.3f}**\n")
   f.write(f"- Samples: **{len(y_true)}**, Classes: **{len(classes)}**\n\n")
   f.write("## Class-wise\n")
   for c in classes:
