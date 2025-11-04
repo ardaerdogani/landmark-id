@@ -1,3 +1,4 @@
+import math
 import os, numpy as np, tensorflow as tf
 from tensorflow import keras
 from sklearn.metrics import confusion_matrix, classification_report
@@ -6,9 +7,10 @@ from pathlib import Path
 from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
 
 IMG=(224,224); SEED=42; BATCH=32
-test_ds, class_names = get_tf_datasets("test", img_size=IMG[0], batch=BATCH, seed=SEED)
+test_ds, class_names, sample_count = get_tf_datasets("test", img_size=IMG[0], batch=BATCH, seed=SEED)
 classes = sorted(class_names)
 test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
+test_steps = max(1, math.ceil(sample_count / BATCH))
 
 model = keras.models.load_model("models/landmark_mnv3.keras")
 model.compile(
@@ -19,7 +21,11 @@ model.compile(
         keras.metrics.TopKCategoricalAccuracy(k=3, name="top3"),
     ],
 )
-res = dict(zip(model.metrics_names, model.evaluate(test_ds, verbose=0)))
+res = dict(zip(model.metrics_names, model.evaluate(test_ds, steps=test_steps, verbose=0)))
+
+# Reload dataset for detailed metrics to ensure fresh iterator
+test_ds, _, _ = get_tf_datasets("test", img_size=IMG[0], batch=BATCH, seed=SEED)
+test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
 
 y_true,y_pred=[],[]
 for bx,by in test_ds:

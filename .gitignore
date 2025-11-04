@@ -1,27 +1,65 @@
+# --- Project data (keep only README) ---
 data/*
 !data/README.md
+
 models/*
 reports/*
 wandb/
-*.ipynb_checkpoints
-.env
+runs*/
+outputs*/
+checkpoints/
+artifacts/
+logs/
 
-# IDE
-.idea/
-.vscode/
+# --- Notebooks ---
+.ipynb_checkpoints/
 
-# .NET
-backend/**/bin/
-backend/**/obj/
-backend/**/*.user
-backend/**/*.suo
-
-# Python
+# --- Python cache/temp ---
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-
-# Temp files
+*.log
 *.tmp
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+.python-version
+
+# --- Large model/weight files ---
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.h5
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.zip
+*.tar
+*.tar.gz
+
+# --- Build/Dist ---
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+.eggs/
+
+# --- OS/IDE ---
 .DS_Store
+.idea/
+.vscode/
+
+# --- .env & secrets ---
+.env
+
+# --- .NET (backend) ---
+backend/**/bin/
+backend/**/obj/
+backend/**/*.user
+backend/**/*.suo

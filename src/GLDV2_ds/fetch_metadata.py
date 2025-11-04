@@ -1,5 +1,6 @@
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -45,35 +46,41 @@ class MetadataFetcher:
         return mapping
     
     #Read top 100 landmarks from filtered .csv
-    def read_filtered_landmarks(self, csv_file: str, top_n: int) -> List[Tuple[str, int]]:
-        landmarks = []
+    def read_filtered_landmarks(self, csv_file: str, top_n: int) -> List[Tuple[Optional[str], str, int]]:
+        landmarks: List[Tuple[Optional[str], str, int]] = []
         try:
-            with open(csv_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()[1:]
-                for i, line in enumerate(lines):
-                    if i >= top_n:
+            with open(csv_file, 'r', encoding='utf-8', newline='') as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    return []
+                for row in reader:
+                    if len(landmarks) >= top_n:
                         break
-                    line = line.strip()
-                    if not line:
+                    raw_label_id = (row.get('label_id') or row.get('id') or row.get('landmark_id') or '').strip()
+                    landmark_name = (row.get('landmark_name') or row.get('name') or '').strip()
+                    count_value = row.get('image_count') or row.get('count') or row.get('num_images') or '0'
+                    try:
+                        image_count = int(count_value)
+                    except (TypeError, ValueError):
+                        image_count = 0
+                    if (not raw_label_id and not landmark_name) or image_count <= 0:
                         continue
-                    parts = line.rsplit(',', 1)
-                    if len(parts) == 2:
-                        name = parts[0].strip()
-                        try:
-                            count = int(parts[1].strip())
-                            if name and count > 0:
-                                landmarks.append((name, count))
-                        except ValueError:
-                            continue
-        except Exception as e:
+                    landmarks.append((raw_label_id or None, landmark_name, image_count))
+        except FileNotFoundError:
+            return []
+        except Exception:
             return []
         
         return landmarks
     
     #Download landmark .json and extract image metadata
-    def fetch_landmark_images(self, landmark_name: str) -> List[Dict]:
+    def fetch_landmark_images(self, label_id: Optional[str], landmark_name: str) -> List[Dict]:
         
-        landmark_id = self.landmark_id_map.get(landmark_name)
+        landmark_id = None
+        if label_id:
+            landmark_id = str(label_id)
+        if not landmark_id and landmark_name:
+            landmark_id = self.landmark_id_map.get(landmark_name)
         if not landmark_id:
             return []
         
@@ -92,6 +99,8 @@ class MetadataFetcher:
                 result.append({
                     'image_id': img.get('id', ''),
                     'url': img.get('url', ''),
+                    'landmark_id': landmark_id,
+                    'landmark_name': landmark_name,
                 })
             
             return result
@@ -158,10 +167,11 @@ def main():
     
     landmark_images = {}
     
-    for landmark_name, _ in tqdm(top_landmarks, desc="Fetching"):
-        images = fetcher.fetch_landmark_images(landmark_name)
+    for label_id, landmark_name, _ in tqdm(top_landmarks, desc="Fetching"):
+        images = fetcher.fetch_landmark_images(label_id, landmark_name)
         if images:
-            landmark_images[landmark_name] = images
+            key = landmark_name or label_id or "unknown"
+            landmark_images[key] = images
     
     if not landmark_images:
         print("Error: No images fetched!")
