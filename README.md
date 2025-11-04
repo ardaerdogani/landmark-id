@@ -142,47 +142,34 @@ Adjust the environment variables for different epoch budgets. The script prints 
 **Run:**
 
 ```bash
-python src/model/eval_and_report.py
+PYTHONPATH=. python src/model/eval_and_report.py
 ```
 
 ---
 
 ## 7) Model Export (TFLite)
 
-* Outputs:
+* Generates:
+  * `models/landmark_mnv3_fp32.tflite`
+  * `models/landmark_mnv3_int8.tflite`
+  * `models/export_savedmodel/`
+  * `assets/labels.txt`
+* Handles removal of the Keras `aug` pipeline so the graph uses only MobileNet + head at inference time.
 
-    * `models/landmark_mnv3_fp32.tflite` (FP32)
-    * `models/landmark_mnv3_int8.tflite` (dynamic‑range INT8)
-* Size target: **≤ 20 MB** (INT8)
-* Runtime speed: measured on device in Sprint 2 (goal **< 150 ms**)
-
-**Example export:**
-
-```bash
-python - << 'PY'
-import tensorflow as tf
-m = tf.keras.models.load_model("models/landmark_mnv3.keras")
-conv = tf.lite.TFLiteConverter.from_keras_model(m)
-open("models/landmark_mnv3_fp32.tflite","wb").write(conv.convert())
-conv.optimizations=[tf.lite.Optimize.DEFAULT]
-open("models/landmark_mnv3_int8.tflite","wb").write(conv.convert())
-print("TFLite export complete")
-PY
-```
-
-**(Optional) W&B artifact:**
+**Export command (default paths):**
 
 ```bash
-python - << 'PY'
-import wandb
-run = wandb.init(project="landmark-id", job_type="export")
-a = wandb.Artifact("landmark-mnv3-tflite", type="model",
-                   description="Vilnius 5-class, FP32+INT8 export")
-    a.add_file("models/landmark_mnv3_fp32.tflite")
-    a.add_file("models/landmark_mnv3_int8.tflite")
-    wandb.log_artifact(a); run.finish()
-PY
+PYTHONPATH=. python scripts/export_tflite.py \
+  --keras-model models/landmark_mnv3.keras \
+  --rep-samples 128
 ```
+
+Useful flags:
+
+* `--skip-int8` → only create the FP32 TFLite model
+* `--rep-samples N` → number of batches used for INT8 calibration (defaults to 128)
+
+Make sure the GLDv2 cache is populated (run at least one training epoch) so the representative dataset can be streamed quickly.
 
 ---
 
@@ -193,17 +180,18 @@ PY
 * **`protobuf 6.x` vs TF 2.16.1** → pin `protobuf<5,>=3.20.3` (e.g., 4.25.8).
 * **`wandb.keras`/graph errors** → move to `wandb.integration.keras` and use `WandbMetricsLogger`; use **Keras** `ModelCheckpoint` for files.
 * **W&B checkpoint FileNotFound** → avoid `WandbModelCheckpoint`; Keras `ModelCheckpoint` writes actual files only on best epoch.
+* **TFLite conversion failed on `StatelessRandom*` ops** → build an inference-only graph without the augmentation stack (`scripts/export_tflite.py`).
 
 ---
 
 ## 9) Definition of Done – Status
 
-* [x] Data ready (5 classes, Commons) with `SOURCES.csv` licenses/attribution
+* [x] Data ready (10 classes, Commons) with `SOURCES.csv` licenses/attribution
 * [x] 70/15/15 split (seed=42)
-* [x] Baseline + fine‑tune training; **val_top1 ~ 77–78%**
+* [ ] Baseline + fine‑tune training hitting DoD metric (**current:** Phase‑1 val_top1 ≈ 0.28, test_top1 ≈ 0.34 → more tuning needed)
 * [x] W&B: runs/metrics/artifacts
-* [x] Confusion matrix + class‑wise metrics reported
-* [ ] TFLite INT8 export files prepared (script above if missing)
+* [ ] Confusion matrix + class‑wise metrics reported (blocked: reinstall `seaborn`)
+* [x] TFLite INT8 export files prepared (`scripts/export_tflite.py`)
 
 ---
 
@@ -231,20 +219,13 @@ python src/data/split.py
 python src/data/log_dataset_wandb.py
 
 # 3) Train (baseline + fine‑tune)
-python src/models/train_keras_wandb.py
+PYTHONPATH=. python src/model/train_keras_wandb.py
 
 # 4) Evaluate + report
-python src/models/eval_and_report.py
+PYTHONPATH=. python src/model/eval_and_report.py
 
 # 5) TFLite export (optional)
-python - << 'PY'
-import tensorflow as tf
-m=tf.keras.models.load_model("models/landmark_mnv3.keras")
-c=tf.lite.TFLiteConverter.from_keras_model(m)
-open("models/landmark_mnv3_fp32.tflite","wb").write(c.convert())
-c.optimizations=[tf.lite.Optimize.DEFAULT]
-open("models/landmark_mnv3_int8.tflite","wb").write(c.convert())
-PY
+PYTHONPATH=. python scripts/export_tflite.py --rep-samples 128
 ```
 
 ---
