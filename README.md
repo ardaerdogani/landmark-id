@@ -12,7 +12,7 @@ Implement a landmark identification app.
 * **Backbone:** `MobileNetV3‑Small` (transfer learning)
 * **Stack:** Python 3.11, TensorFlow 2.16.1, Keras 3, Weights & Biases (W&B) 0.22.1
 * **Data source:** Google Landmarks Dataset v2 (Lithuania subset, dynamically selected top classes)
-* **Classes:** depends on current GLDv2 query (configurable `top-n`)
+* **Classes:** 10 (current GLDv2 Lithuania subset; configurable via `top-n`)
 
 **Definition of Done (Sprint 1):**
 
@@ -39,7 +39,8 @@ landmark-id/
     model/
       train_keras_wandb.py  # training + W&B logging
       eval_and_report.py    # test & report (CM, class-wise)
-      export_tflite.py      # model export utilities
+  scripts/                  # assorted CLI helpers
+    export_tflite.py        # inference + TFLite export utility
   .venv/                    # local virtual environment (optional)
 ```
 
@@ -105,26 +106,27 @@ python src/GLDV2_ds/create_split.py --metadata data/metadata.json --out-dir data
 
 ## 5) Model Training (Baseline + Fine‑tune)
 
-### 5.1 Baseline (head‑only)
+### 5.1 Phase 1 – Head‑only warm-up
 
-* Backbone: `MobileNetV3Small(weights="imagenet", include_top=False)`
+* Backbone frozen (`base.trainable = False`)
 * Optimizer: `AdamW(lr=1e-3, weight_decay=1e-4)`
-* Augment: flip, zoom, brightness, contrast
-* Metrics: `top1`, `top3`
-* Class balancing: inverse-frequency `class_weight`
-* Checkpoint: `ModelCheckpoint(filepath="models/ckpt_{epoch:02d}_{val_loss:.3f}.keras", save_best_only=True)`
+* Data augment: flip / zoom / brightness / contrast
+* Callbacks: `ReduceLROnPlateau(factor=0.2, patience=2)`, `EarlyStopping(patience=4, restore_best_weights=True)`, `ModelCheckpoint("models/phase1_ckpt_{epoch:02d}_{val_loss:.3f}.keras")`
 
-**Train:**
+### 5.2 Phase 2 – Backbone fine-tune
+
+* Script reloads the best Phase‑1 checkpoint (`Loaded weights from ...`)
+* BatchNorm layers stay frozen; the last 20 non-BN layers are unfrozen
+* Optimizer: `Adam(lr=3e-5)` with label smoothing `0.05`
+* Same callback trio writes `models/phase2_ckpt_{epoch:02d}_{val_loss:.3f}.keras`
+
+**Run both phases (sequential in one command):**
 
 ```bash
-python src/model/train_keras_wandb.py
+PYTHONPATH=. LANDMARK_EPOCHS=8 LANDMARK_FINE_TUNE_EPOCHS=12 python src/model/train_keras_wandb.py
 ```
 
-### 5.2 Fine‑tuning
-
-* Strategy: unfreeze backbone, keep BatchNorm frozen, train final ~15 layers
-* Optimizer: `AdamW(lr=3e-6, weight_decay=0)` + label smoothing (0.05)
-* ReduceLROnPlateau callback for stability
+Adjust the environment variables for different epoch budgets. The script prints which checkpoint is restored before fine-tuning begins.
 
 ---
 
