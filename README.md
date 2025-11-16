@@ -176,11 +176,14 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 
 ## 8) Issues We Hit & Fixes
 
-* **`ModuleNotFoundError: mwclient`** → wrong interpreter; use `.venv/bin/python`, reinstall via `python -m pip install mwclient`.
-* **Wikimedia API `JSONDecodeError`** → switched to a robust requests‑based fetcher with UA + retries; dump non‑JSON to `logs/last_response.html`.
-* **`protobuf 6.x` vs TF 2.16.1** → pin `protobuf<5,>=3.20.3` (e.g., 4.25.8).
-* **TensorBoard UI empty** → ensure at least one training run exists and launch via `tensorboard --logdir tb_logs`; verify the run folder matches the timestamp printed by the trainer.
-* **TFLite conversion failed on `StatelessRandom*` ops** → build an inference-only graph without the augmentation stack (`scripts/export_tflite.py`).
+* **Sparse or low-quality classes** → Many landmarks had only 1–5 usable images (or broken links). **Fix:** enforce a ≥10-15 image threshold, drop severely underrepresented classes, regenerate metadata.
+* **Class filtering difficulty** → Original 799 classes were wildly uneven. **Fix:** pick the top 10 well-represented GLDv2 classes; flag the rest for later expansion.
+* **Broken/missing URLs** → 404/timeouts/corrupted JPEGs during metadata fetch. **Fix:** add retry logic, re-fetch, and auto-prune failed entries.
+* **Imbalanced distribution** → Large classes were downsampled but small classes stayed tiny. **Fix:** keep balanced sampling and plan oversampling for key small classes.
+* **Wikimedia `JSONDecodeError`** → API sometimes served malformed JSON. **Fix:** switch to a robust requests-based fetcher with user-agent + retry handling.
+* **Interpreter/dependency mismatches** → `mwclient` missing and `protobuf 6.x` conflicts. **Fix:** ensure the `.landmark-env` env is active and pin `protobuf<5`.
+* **TensorBoard showing empty logs** → TB launched before any run data existed. **Fix:** run at least one epoch first and point TB to the timestamped run folder.
+* **TFLite conversion failures** → Augmentation stack injected unsupported random ops. **Fix:** export an inference-only graph without the augmentation layers (`scripts/export_tflite.py`).
 
 ---
 
