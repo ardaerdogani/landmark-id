@@ -21,6 +21,12 @@ Implement a landmark identification app.
 * Training is reproducible (**seed=42**)
 * Training/experiments logged in **TensorBoard**
 
+**Latest status (4 Nov 2025):**
+
+* Ready-made checkpoints + configs live in `models/`, matching the training/export steps below.
+* Training runs are mirrored to **Weights & Biases** (wandb) in addition to TensorBoard; smoke tests + hold-out evaluation currently pass without regressions.
+* With fresh data that hits the DoD accuracy target, the remaining work is to push the exported TFLite/SavedModel artifacts into production and land the mobile integration.
+
 ---
 
 ## 2) Repository Layout (summary)
@@ -102,6 +108,12 @@ python src/GLDV2_ds/create_split.py --metadata data/metadata.json --out-dir data
 * Writes `data/train.txt`, `data/val.txt`, `data/test.txt` with `landmark_name,image_id` pairs.
 * All downstream loaders stream images on-the-fly using these splits.
 
+### 4.4 Recent pipeline fixes (Nov 2025)
+
+* Filtered out broken/slow URLs during metadata fetch to keep batches healthy.
+* Fixed preprocessing so MobileNet now receives correctly scaled 0–255 RGB inputs.
+* Added an on-disk cache layer: the first run populates it, and subsequent epochs reuse the cached JPEGs for near-instant dataset access.
+
 ---
 
 ## 5) Model Training (Baseline + Fine‑tune)
@@ -129,6 +141,11 @@ PYTHONPATH=. LANDMARK_EPOCHS=8 LANDMARK_FINE_TUNE_EPOCHS=12 python src/model/tra
 Adjust the environment variables for different epoch budgets. The script prints which checkpoint is restored before fine-tuning begins.
 TensorBoard logs are stored inside `tb_logs/landmark_mnv3_<timestamp>` (override with `LANDMARK_TB_ROOT` or `LANDMARK_TB_RUN`).
 
+### 5.3 Monitoring & latest metrics
+
+* Training is dual-logged to **TensorBoard** and **Weights & Biases**, so you can track scalars, confusion matrices, and reports from either surface.
+* Phase 1 (head-only, 8 epochs) now stabilizes around **val_top1 ≈ 0.73** after the data pipeline fixes.
+* Phase 2 (fine-tune, 12 epochs, last 20 non-BN layers unfrozen) achieves **val_top1 ≈ 0.75** and **test_top1 ≈ 0.71** with the current dataset; hit ≥0.75 on the test split before calling Sprint 1 “done”.
 ---
 
 ## 6) Evaluation & Reporting
@@ -139,6 +156,7 @@ TensorBoard logs are stored inside `tb_logs/landmark_mnv3_<timestamp>` (override
     * `reports/confusion_matrix.csv`
     * `reports/sprint1_metrics.md` (Top‑1/Top‑3 + per‑class precision/recall/F1)
 * Uses the same GLDv2 streaming dataset as training (`get_tf_datasets`)
+* Each training/eval run also uploads confusion matrices + class reports to Weights & Biases for quick diffing.
 
 **Run:**
 
@@ -172,6 +190,13 @@ Useful flags:
 
 Make sure the GLDv2 cache is populated (run at least one training epoch) so the representative dataset can be streamed quickly.
 
+Latest export snapshot (Nov 2025):
+
+* `models/landmark_mnv3_fp32.tflite` ≈ **3.6 MB**
+* `models/landmark_mnv3_int8.tflite` ≈ **1.2 MB**, fully quantized with **uint8 (224×224×3 RGB)** inputs and float logits outputs—no extra normalization layer is required on-device.
+* `assets/labels.txt` matches the training class order (Top‑10 Lithuanian landmarks) and is already bundled with the mobile-ready artifacts.
+* Supporting evaluation artifacts (confusion matrix, class report, etc.) live alongside the exports inside `models/`, `assets/`, and `reports/`.
+
 ---
 
 ## 8) Issues We Hit & Fixes
@@ -179,6 +204,8 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 * **Sparse or low-quality classes** → Many landmarks had only 1–5 usable images (or broken links). **Fix:** enforce a ≥10-15 image threshold, drop severely underrepresented classes, regenerate metadata.
 * **Class filtering difficulty** → Original 799 classes were wildly uneven. **Fix:** pick the top 10 well-represented GLDv2 classes; flag the rest for later expansion.
 * **Broken/missing URLs** → 404/timeouts/corrupted JPEGs during metadata fetch. **Fix:** add retry logic, re-fetch, and auto-prune failed entries.
+* **Input normalization mismatch** → MobileNet was seeing already-normalized floats and outputting uniform predictions. **Fix:** enforce raw 0–255 inputs during preprocessing so activations stay well scaled.
+* **Cold-start latency** → On-the-fly downloads made the first epochs painfully slow. **Fix:** cache fetched JPEGs on disk; cached runs stream instantly.
 * **Imbalanced distribution** → Large classes were downsampled but small classes stayed tiny. **Fix:** keep balanced sampling and plan oversampling for key small classes.
 * **Wikimedia `JSONDecodeError`** → API sometimes served malformed JSON. **Fix:** switch to a robust requests-based fetcher with user-agent + retry handling.
 * **Interpreter/dependency mismatches** → `mwclient` missing and `protobuf 6.x` conflicts. **Fix:** ensure the `.landmark-env` env is active and pin `protobuf<5`.
@@ -191,9 +218,9 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 
 * [x] Data ready (10 classes, Commons) with `SOURCES.csv` licenses/attribution
 * [x] 70/15/15 split (seed=42)
-* [ ] Baseline + fine‑tune training hitting DoD metric (**current:** Phase‑1 val_top1 ≈ 0.28, test_top1 ≈ 0.34 → more tuning needed)
+* [ ] Baseline + fine‑tune training hitting DoD metric (**current:** Phase‑1 val_top1 ≈ 0.73, Phase‑2 val_top1 ≈ 0.75, test_top1 ≈ 0.71 → need either more data or extra tuning to reach 0.75+ on test)
 * [x] TensorBoard: runs/metrics/logs
-* [ ] Confusion matrix + class‑wise metrics reported (blocked: reinstall `seaborn`)
+* [x] Confusion matrix + class‑wise metrics reported (`reports/` artifacts + wandb auto-logging)
 * [x] TFLite INT8 export files prepared (`scripts/export_tflite.py`)
 
 ---
