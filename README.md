@@ -10,7 +10,7 @@ Implement a landmark identification app.
 * **Task finish deadline:** 15 November 2025
 * **MVP flow:** Camera → single frame → **TFLite (INT8)** model → **Top‑3** predictions on screen
 * **Backbone:** `MobileNetV3‑Small` (transfer learning)
-* **Stack:** Python 3.11, TensorFlow 2.16.1, Keras 3, Weights & Biases (W&B) 0.22.1
+* **Stack:** Python 3.11, TensorFlow 2.16.1, Keras 3, TensorBoard 2.16
 * **Data source:** Google Landmarks Dataset v2 (Lithuania subset, dynamically selected top classes)
 * **Classes:** 10 (current GLDv2 Lithuania subset; configurable via `top-n`)
 
@@ -19,7 +19,7 @@ Implement a landmark identification app.
 * Test set **Top‑1 ≥ 75%**
 * Model size **≤ 15–20 MB** (INT8 target)
 * Training is reproducible (**seed=42**)
-* Training/experiments logged in **W&B**
+* Training/experiments logged in **TensorBoard**
 
 ---
 
@@ -37,7 +37,7 @@ landmark-id/
       create_split.py       # emit train/val/test txt files
       gldv2_dataset.py      # TF streaming dataset loader
     model/
-      train_keras_wandb.py  # training + W&B logging
+      train_keras_tensorboard.py  # training + TensorBoard logging
       eval_and_report.py    # test & report (CM, class-wise)
   scripts/                  # assorted CLI helpers
     export_tflite.py        # inference + TFLite export utility
@@ -54,7 +54,7 @@ landmark-id/
 
     * `tensorflow==2.16.1`
     * `protobuf<5,>=3.20.3` (e.g., 4.25.8) ← required for TF 2.16.1
-    * `wandb==0.22.1`
+    * `tensorboard>=2.16.0`
 
 **Install:**
 
@@ -62,13 +62,13 @@ landmark-id/
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install tensorflow==2.16.1 pillow tqdm wandb "protobuf<5,>=3.20.3"
+pip install tensorflow==2.16.1 pillow tqdm tensorboard "protobuf<5,>=3.20.3"
 ```
 
-**W&B login:**
+**TensorBoard:** (optional, after the first training run)
 
 ```bash
-wandb login
+tensorboard --logdir tb_logs --port 6006
 ```
 
 ---
@@ -123,10 +123,11 @@ python src/GLDV2_ds/create_split.py --metadata data/metadata.json --out-dir data
 **Run both phases (sequential in one command):**
 
 ```bash
-PYTHONPATH=. LANDMARK_EPOCHS=8 LANDMARK_FINE_TUNE_EPOCHS=12 python src/model/train_keras_wandb.py
+PYTHONPATH=. LANDMARK_EPOCHS=8 LANDMARK_FINE_TUNE_EPOCHS=12 python src/model/train_keras_tensorboard.py
 ```
 
 Adjust the environment variables for different epoch budgets. The script prints which checkpoint is restored before fine-tuning begins.
+TensorBoard logs are stored inside `tb_logs/landmark_mnv3_<timestamp>` (override with `LANDMARK_TB_ROOT` or `LANDMARK_TB_RUN`).
 
 ---
 
@@ -178,8 +179,7 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 * **`ModuleNotFoundError: mwclient`** → wrong interpreter; use `.venv/bin/python`, reinstall via `python -m pip install mwclient`.
 * **Wikimedia API `JSONDecodeError`** → switched to a robust requests‑based fetcher with UA + retries; dump non‑JSON to `logs/last_response.html`.
 * **`protobuf 6.x` vs TF 2.16.1** → pin `protobuf<5,>=3.20.3` (e.g., 4.25.8).
-* **`wandb.keras`/graph errors** → move to `wandb.integration.keras` and use `WandbMetricsLogger`; use **Keras** `ModelCheckpoint` for files.
-* **W&B checkpoint FileNotFound** → avoid `WandbModelCheckpoint`; Keras `ModelCheckpoint` writes actual files only on best epoch.
+* **TensorBoard UI empty** → ensure at least one training run exists and launch via `tensorboard --logdir tb_logs`; verify the run folder matches the timestamp printed by the trainer.
 * **TFLite conversion failed on `StatelessRandom*` ops** → build an inference-only graph without the augmentation stack (`scripts/export_tflite.py`).
 
 ---
@@ -189,7 +189,7 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 * [x] Data ready (10 classes, Commons) with `SOURCES.csv` licenses/attribution
 * [x] 70/15/15 split (seed=42)
 * [ ] Baseline + fine‑tune training hitting DoD metric (**current:** Phase‑1 val_top1 ≈ 0.28, test_top1 ≈ 0.34 → more tuning needed)
-* [x] W&B: runs/metrics/artifacts
+* [x] TensorBoard: runs/metrics/logs
 * [ ] Confusion matrix + class‑wise metrics reported (blocked: reinstall `seaborn`)
 * [x] TFLite INT8 export files prepared (`scripts/export_tflite.py`)
 
@@ -209,17 +209,17 @@ Make sure the GLDv2 cache is populated (run at least one training epoch) so the 
 # 1) Environment
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
-pip install tensorflow==2.16.1 pillow tqdm wandb "protobuf<5,>=3.20.3"
-wandb login
+pip install tensorflow==2.16.1 pillow tqdm tensorboard "protobuf<5,>=3.20.3"
 
 # 2) Data → split → artifact
 a=120; s=400
 python scripts/fetch_commons_requests.py --max-per-class $a --min-size $s
 python src/data/split.py
-python src/data/log_dataset_wandb.py
 
 # 3) Train (baseline + fine‑tune)
-PYTHONPATH=. python src/model/train_keras_wandb.py
+PYTHONPATH=. python src/model/train_keras_tensorboard.py
+# Optional: monitor training
+# tensorboard --logdir tb_logs
 
 # 4) Evaluate + report
 PYTHONPATH=. python src/model/eval_and_report.py
@@ -237,4 +237,4 @@ PYTHONPATH=. python scripts/export_tflite.py --rep-samples 128
 
 ---
 
-*Prepared for team sharing; feel free to open a repo issue or comment on the W&B run if you need tweaks.*
+*Prepared for team sharing; feel free to open a repo issue or drop a note alongside the TensorBoard run if you need tweaks.*
