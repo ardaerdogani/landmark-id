@@ -146,6 +146,19 @@ TensorBoard logs are stored inside `tb_logs/landmark_mnv3_<timestamp>` (override
 * Training is dual-logged to **TensorBoard** and **Weights & Biases**, so you can track scalars, confusion matrices, and reports from either surface.
 * Phase 1 (head-only, 8 epochs) now stabilizes around **val_top1 ≈ 0.73** after the data pipeline fixes.
 * Phase 2 (fine-tune, 12 epochs, last 20 non-BN layers unfrozen) achieves **val_top1 ≈ 0.75** and **test_top1 ≈ 0.71** with the current dataset; hit ≥0.75 on the test split before calling Sprint 1 “done”.
+
+### 5.4 Mix locally captured mobile photos
+
+If you have a folder with real mobile shots laid out as `data/mobile_photos/<class_name>/*.jpg`, point the trainer to it via:
+
+```bash
+LANDMARK_MOBILE_DIR=data/mobile_photos LANDMARK_MOBILE_WEIGHT=0.35 \
+PYTHONPATH=. python src/model/train_keras_tensorboard.py
+```
+
+* The folder names must match the entries in `assets/labels.txt` (case-sensitive).
+* `LANDMARK_MOBILE_WEIGHT` controls the sampling ratio between GLDv2 streaming data and the local folder (default `0.30`).
+* The loader reuses the same augmentations + preprocessing so field photos are blended directly into both the warm-up and fine-tune phases.
 ---
 
 ## 6) Evaluation & Reporting
@@ -199,7 +212,21 @@ Latest export snapshot (Nov 2025):
 
 ---
 
-## 8) Issues We Hit & Fixes
+## 8) Mobile field evaluation & debugging
+
+Use `scripts/eval_mobile_folder.py` to sanity-check how the current `.keras` checkpoint behaves on raw frames taken from the target devices:
+
+```bash
+PYTHONPATH=. python scripts/eval_mobile_folder.py \
+  --image-dir data/mobile_eval_samples \
+  --model models/landmark_mnv3.keras
+```
+
+* Expect the directory layout `data/mobile_eval_samples/<class>/<device_shot>.jpg`.
+* The script outputs overall Top‑1/Top‑K accuracy, per-class stats, and the per-image Top‑K rankings in `reports/mobile_eval_<timestamp>.json`.
+* Feed the resulting JSON into your favourite notebook or visualization tool to inspect consistent failure modes before retraining.
+
+## 9) Issues We Hit & Fixes
 
 * **Sparse or low-quality classes** → Many landmarks had only 1–5 usable images (or broken links). **Fix:** enforce a ≥10-15 image threshold, drop severely underrepresented classes, regenerate metadata.
 * **Class filtering difficulty** → Original 799 classes were wildly uneven. **Fix:** pick the top 10 well-represented GLDv2 classes; flag the rest for later expansion.
@@ -214,7 +241,7 @@ Latest export snapshot (Nov 2025):
 
 ---
 
-## 9) Definition of Done – Status
+## 10) Definition of Done – Status
 
 * [x] Data ready (10 classes, Commons) with `SOURCES.csv` licenses/attribution
 * [x] 70/15/15 split (seed=42)
@@ -225,7 +252,7 @@ Latest export snapshot (Nov 2025):
 
 ---
 
-## 10) Handoff to Sprint 2 (short)
+## 11) Handoff to Sprint 2 (short)
 
 * Flutter integration (camera → TFLite → Top‑3). Ensure `labels.txt` order matches training class order.
 * On‑device latency benchmarking (**< 150 ms** goal) + permission/error UX.
@@ -233,7 +260,7 @@ Latest export snapshot (Nov 2025):
 
 ---
 
-## 11) One‑Shot Quickstart (repro commands)
+## 12) One‑Shot Quickstart (repro commands)
 
 ```bash
 # 1) Environment

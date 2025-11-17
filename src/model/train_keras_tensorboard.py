@@ -14,6 +14,7 @@ from tensorflow.keras import layers
 from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
 
 
+
 CONFIG = {
     "arch": "MobileNetV3Small",
     "img_size": 224,
@@ -72,6 +73,39 @@ test_ds, _, test_samples = get_tf_datasets("test", img_size=CFG.img_size, batch=
 
 class_names = sorted(class_names)
 AUTOTUNE = tf.data.AUTOTUNE
+
+# Optional: mix locally captured mobile photos into the training stream.
+mobile_dir = os.getenv("LANDMARK_MOBILE_DIR")
+mobile_weight_raw = os.getenv("LANDMARK_MOBILE_WEIGHT", "0.3")
+try:
+    mobile_weight = float(mobile_weight_raw)
+except ValueError:
+    print(f"[train_keras_tensorboard] Invalid LANDMARK_MOBILE_WEIGHT='{mobile_weight_raw}', defaulting to 0.3")
+    mobile_weight = 0.3
+mobile_weight = min(max(mobile_weight, 0.0), 0.95)
+if mobile_dir:
+    try:
+        from src.GLDV2_ds.mobile_folder_dataset import build_mobile_dataset
+
+        mobile_ds, mobile_samples = build_mobile_dataset(
+            mobile_dir, class_names, CFG.img_size, CFG.batch, CFG.seed
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        mobile_ds, mobile_samples = (None, 0)
+        print(f"[train_keras_tensorboard] Failed to load mobile dataset: {exc}")
+
+    if mobile_ds is not None and mobile_samples:
+        weights = [1.0 - mobile_weight, mobile_weight]
+        train_ds = tf.data.Dataset.sample_from_datasets(
+            [train_ds, mobile_ds],
+            weights=weights,
+            seed=CFG.seed,
+        )
+        train_samples += mobile_samples
+        print(
+            f"[train_keras_tensorboard] Mixing GLDv2 + {mobile_samples} mobile frames with weight={mobile_weight:.2f}"
+        )
+
 train_ds = train_ds.prefetch(AUTOTUNE)
 val_ds = val_ds.prefetch(AUTOTUNE)
 test_ds = test_ds.prefetch(AUTOTUNE)
@@ -93,9 +127,12 @@ class_weight = {i: total / (len(class_names) * counts[name]) for i, name in enum
 data_augment = keras.Sequential(
     [
         layers.RandomFlip("horizontal"),
-        layers.RandomZoom(0.12),
-        layers.RandomBrightness(0.15),
-        layers.RandomContrast(0.10),
+        layers.RandomRotation(0.08, fill_mode="reflect"),
+        layers.RandomTranslation(0.08, 0.08, fill_mode="reflect"),
+        layers.RandomZoom(height_factor=(-0.15, 0.2), width_factor=(-0.15, 0.2), fill_mode="reflect"),
+        layers.RandomBrightness(0.2),
+        layers.RandomContrast(0.15),
+        layers.GaussianNoise(4.0),
     ],
     name="aug",
 )
@@ -119,7 +156,10 @@ opt = keras.optimizers.AdamW(learning_rate=CFG.lr, weight_decay=CFG.weight_decay
 model.compile(
     optimizer=opt,
     loss="categorical_crossentropy",
-    metrics=["accuracy"],
+    metrics=[
+        keras.metrics.CategoricalAccuracy(name="top1"),
+        keras.metrics.TopKCategoricalAccuracy(k=3, name="top3"),
+    ],
 )
 
 os.makedirs("models", exist_ok=True)
@@ -210,7 +250,10 @@ if CFG.fine_tune_epochs > 0:
     model.compile(
         optimizer=opt_ft,
         loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
-        metrics=["accuracy"],
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name="top1"),
+            keras.metrics.TopKCategoricalAccuracy(k=3, name="top3"),
+        ],
     )
 
     phase2_ckpt, phase2_plateau, phase2_early = build_callbacks(prefix="phase2_")
