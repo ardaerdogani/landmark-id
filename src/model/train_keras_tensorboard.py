@@ -19,13 +19,15 @@ CONFIG = {
     "arch": "MobileNetV3Small",
     "img_size": 224,
     "batch": 32,
-    "epochs": 25,
+    "epochs": 10,
     "optimizer": "AdamW",
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "augment": "flip,zoom,brightness,contrast",
     "seed": 42,
     "fine_tune_epochs": 10,
+    "fine_tune_unfreeze_layers": 80,
+    "fine_tune_lr": 2e-5,
 }
 
 
@@ -44,6 +46,8 @@ _safe_override("LANDMARK_FINE_TUNE_EPOCHS", lambda v: max(0, int(v)), "fine_tune
 _safe_override("LANDMARK_BATCH", lambda v: max(1, int(v)), "batch")
 _safe_override("BATCH_SIZE", lambda v: max(1, int(v)), "batch")
 _safe_override("LANDMARK_SHUFFLE_FRAC", float, "shuffle_frac")
+_safe_override("LANDMARK_FINE_TUNE_UNFREEZE", lambda v: int(v), "fine_tune_unfreeze_layers")
+_safe_override("LANDMARK_FINE_TUNE_LR", float, "fine_tune_lr")
 
 CFG = SimpleNamespace(**CONFIG)
 
@@ -132,7 +136,7 @@ data_augment = keras.Sequential(
         layers.RandomZoom(height_factor=(-0.15, 0.2), width_factor=(-0.15, 0.2), fill_mode="reflect"),
         layers.RandomBrightness(0.2),
         layers.RandomContrast(0.15),
-        layers.GaussianNoise(4.0),
+        layers.GaussianNoise(0.05),
     ],
     name="aug",
 )
@@ -148,7 +152,7 @@ x = data_augment(inputs)
 x = keras.applications.mobilenet_v3.preprocess_input(x)
 x = base(x, training=False)
 x = layers.GlobalAveragePooling2D()(x)
-x = layers.Dropout(0.2)(x)
+x = layers.Dropout(0.1)(x)
 outputs = layers.Dense(len(class_names), activation="softmax")(x)
 model = keras.Model(inputs, outputs)
 
@@ -239,13 +243,18 @@ if CFG.fine_tune_epochs > 0:
     for layer in base.layers:
         layer.trainable = False
 
-    for layer in base.layers[-20:]:
+    if CFG.fine_tune_unfreeze_layers <= 0:
+        layers_to_unfreeze = len(base.layers)
+    else:
+        layers_to_unfreeze = min(len(base.layers), CFG.fine_tune_unfreeze_layers)
+
+    for layer in base.layers[-layers_to_unfreeze:]:
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
         else:
             layer.trainable = True
 
-    opt_ft = keras.optimizers.Adam(learning_rate=3e-5)
+    opt_ft = keras.optimizers.Adam(learning_rate=CFG.fine_tune_lr)
 
     model.compile(
         optimizer=opt_ft,

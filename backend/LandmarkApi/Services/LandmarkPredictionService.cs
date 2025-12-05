@@ -29,6 +29,7 @@ public class PredictionResult
 /// </summary>
 public class LandmarkPredictionService : IDisposable
 {
+    private const string PythonScriptVersion = "2025-02-16_raw_uint8_v2";
     private readonly string[] _labels;
     private readonly string _modelPath;
     private readonly string _pythonPath;
@@ -77,10 +78,22 @@ public class LandmarkPredictionService : IDisposable
             // Create Python script path
             var scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "predict_tflite.py");
 
-            // If script doesn't exist, use Python inference
-            if (!File.Exists(scriptPath))
+            var scriptNeedsRefresh = true;
+            if (File.Exists(scriptPath))
             {
-                _logger.LogWarning("Python script not found. Creating it...");
+                try
+                {
+                    var content = await File.ReadAllTextAsync(scriptPath);
+                    scriptNeedsRefresh = !content.Contains(PythonScriptVersion);
+                }
+                catch (Exception)
+                {
+                    scriptNeedsRefresh = true;
+                }
+            }
+            if (scriptNeedsRefresh)
+            {
+                _logger.LogWarning("Creating/refreshing Python inference script...");
                 await CreatePythonScript(scriptPath);
             }
 
@@ -109,7 +122,7 @@ public class LandmarkPredictionService : IDisposable
         var psi = new ProcessStartInfo
         {
             FileName = _pythonPath,
-            Arguments = $"\"{scriptPath}\" \"{_modelPath}\" \"{imagePath}\"",
+            Arguments = $"\"{scriptPath}\" \"{_modelPath}\" \"{imagePath}\" \"{_labels.Length}\"",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -153,6 +166,8 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 
+# version: 2025-02-16_raw_uint8_v2
+
 def predict(model_path, image_path):
     # Load TFLite model
     interpreter = tf.lite.Interpreter(model_path=model_path)
@@ -160,16 +175,35 @@ def predict(model_path, image_path):
 
     input_details = interpreter.get_input_details()[0]
     output_details = interpreter.get_output_details()[0]
+    expected_classes = int(sys.argv[3]) if len(sys.argv) > 3 else None
+
+    # Validate model output dimension against labels
+    num_classes = int(output_details['shape'][-1])
+    if expected_classes is not None and num_classes != expected_classes:
+        sys.stderr.write(
+            f'Label/model mismatch: model outputs {num_classes} classes but labels length is {expected_classes}\\n'
+        )
+        sys.exit(1)
 
     # Load and preprocess image
-    img = Image.open(image_path).convert('RGB').resize((224, 224))
-    img_array = np.array(img, dtype=np.float32) / 255.0
+    img = Image.open(image_path).convert('RGB').resize((224, 224), Image.Resampling.BILINEAR)
+    # Keep raw 0-255 inputs to match training/exported TFLite (uint8)
+    img_array = np.array(img, dtype=np.uint8)
     img_array = np.expand_dims(img_array, axis=0)
 
     # Run inference
     interpreter.set_tensor(input_details['index'], img_array)
     interpreter.invoke()
     output = interpreter.get_tensor(output_details['index'])[0]
+
+    # Dequantize if necessary so confidences are meaningful
+    if output_details['dtype'] in (np.uint8, np.int8):
+        scale, zero_point = output_details['quantization']
+        if scale is not None:
+            scale_val = scale if np.isscalar(scale) else float(scale[0])
+            zero_val = zero_point if np.isscalar(zero_point) else int(zero_point[0])
+            if scale_val != 0:
+                output = (output.astype(np.float32) - zero_val) * scale_val
 
     # Get top-3
     top3_idx = np.argsort(output)[-3:][::-1]
