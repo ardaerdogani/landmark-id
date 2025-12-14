@@ -21,9 +21,9 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? "Host=localhost;Database=landmark_db;Username=postgres;Password=postgres";
 builder.Services.AddDbContext<LandmarkDbContext>(options =>
     options.UseNpgsql(connectionString));
-
-// Register prediction service as singleton (model loaded once)
-builder.Services.AddSingleton<LandmarkPredictionService>();
+builder.Services.AddHttpClient<WikipediaService>();
+builder.Services.AddScoped<WikipediaService>();
+builder.Services.AddScoped<LandmarkPredictionService>();
 
 // Configure CORS for mobile app access
 builder.Services.AddCors(options =>

@@ -4,6 +4,7 @@ export interface LandmarkPrediction {
   label: string;
   confidence: number;
   rank: number;
+  wikipediaUrl?: string;
 }
 
 export interface PredictionResult {

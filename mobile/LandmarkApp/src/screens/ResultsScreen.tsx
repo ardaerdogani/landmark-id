@@ -1,38 +1,60 @@
 import React from 'react';
 import {
   View,
-  StyleSheet,
   Text,
-  Image,
+  StyleSheet,
   ScrollView,
+  TouchableOpacity,
+  Linking,
+  Image,
 } from 'react-native';
-import { Card, Button, ProgressBar } from 'react-native-paper';
-import { LANDMARK_NAMES, CONFIDENCE_THRESHOLD } from '../types';
+import { Card, Button } from 'react-native-paper';
+import { LandmarkPrediction, PredictionResult, LANDMARK_NAMES, CONFIDENCE_THRESHOLD } from '../types/index';
 
 interface ResultsScreenProps {
   route: any;
   navigation: any;
 }
 
+// Helper to format landmark names nicely
+const formatLandmarkName = (name: string): string => {
+  // Check if it's in the mapping
+  if (LANDMARK_NAMES[name]) {
+    return LANDMARK_NAMES[name];
+  }
+  
+  // Decode URL-encoded characters (e.g., %C5%BE -> ž)
+  const decoded = decodeURIComponent(name);
+  
+  // Replace underscores with spaces
+  const withSpaces = decoded.replace(/_/g, ' ');
+  
+  // Capitalize each word
+  return withSpaces
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+};
+
 export default function ResultsScreen({ route, navigation }: ResultsScreenProps) {
-  const { prediction, imageUri } = route.params;
+  const { prediction, imageUri }: { prediction: PredictionResult; imageUri: string } = route.params;
   const topPrediction = prediction.predictions[0];
   const isConfident = topPrediction.confidence >= CONFIDENCE_THRESHOLD;
 
-  const getDisplayName = (label: string) => {
-    return LANDMARK_NAMES[label] || label;
-  };
-
-  const formatConfidence = (confidence: number) => {
-    return `${(confidence * 100).toFixed(1)}%`;
+  const handleWikipediaPress = () => {
+    if (topPrediction.wikipediaUrl) {
+      Linking.openURL(topPrediction.wikipediaUrl);
+    }
   };
 
   return (
     <ScrollView style={styles.container}>
       {/* Image */}
-      <Card style={styles.imageCard}>
-        <Image source={{ uri: imageUri }} style={styles.image} />
-      </Card>
+      {imageUri && (
+        <Card style={styles.imageCard}>
+          <Image source={{ uri: imageUri }} style={styles.image} />
+        </Card>
+      )}
 
       {/* Confidence warning */}
       {!isConfident && (
@@ -52,11 +74,23 @@ export default function ResultsScreen({ route, navigation }: ResultsScreenProps)
         <Card.Content>
           <Text style={styles.topLabel}>Top Prediction</Text>
           <Text style={styles.topLandmark}>
-            {getDisplayName(topPrediction.label)}
+            {formatLandmarkName(topPrediction.label)}
           </Text>
           <Text style={styles.topConfidence}>
-            {formatConfidence(topPrediction.confidence)} confident
+            {(topPrediction.confidence * 100).toFixed(1)}% confident
           </Text>
+
+          {/* Wikipedia Button */}
+          {topPrediction.wikipediaUrl ? (
+            <TouchableOpacity 
+              style={styles.wikiButton} 
+              onPress={handleWikipediaPress}
+            >
+              <Text style={styles.wikiButtonText}>📖 Read on Wikipedia</Text>
+            </TouchableOpacity>
+          ) : (
+            <Text style={styles.noWiki}>Wikipedia article not available</Text>
+          )}
         </Card.Content>
       </Card>
 
@@ -65,22 +99,28 @@ export default function ResultsScreen({ route, navigation }: ResultsScreenProps)
         <Card.Content>
           <Text style={styles.sectionTitle}>Top 3 Predictions</Text>
 
-          {prediction.predictions.map((pred: any, index: number) => (
+          {prediction.predictions.map((pred: LandmarkPrediction, index: number) => (
             <View key={index} style={styles.predictionItem}>
               <View style={styles.predictionHeader}>
                 <Text style={styles.predictionRank}>#{pred.rank}</Text>
                 <Text style={styles.predictionLabel}>
-                  {getDisplayName(pred.label)}
+                  {formatLandmarkName(pred.label)}
                 </Text>
                 <Text style={styles.predictionConfidence}>
-                  {formatConfidence(pred.confidence)}
+                  {(pred.confidence * 100).toFixed(1)}%
                 </Text>
               </View>
-              <ProgressBar
-                progress={pred.confidence}
-                color={pred.rank === 1 ? '#6200ea' : '#9e9e9e'}
-                style={styles.progressBar}
-              />
+              <View style={styles.progressBar}>
+                <View 
+                  style={[
+                    styles.progressFill,
+                    { 
+                      width: `${pred.confidence * 100}%`,
+                      backgroundColor: pred.rank === 1 ? '#6200ea' : '#9e9e9e'
+                    }
+                  ]} 
+                />
+              </View>
             </View>
           ))}
         </Card.Content>
@@ -169,6 +209,27 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#fff',
     opacity: 0.9,
+    marginBottom: 15,
+  },
+  wikiButton: {
+    backgroundColor: '#fff',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  wikiButtonText: {
+    color: '#6200ea',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  noWiki: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    fontStyle: 'italic',
+    marginTop: 10,
+    textAlign: 'center',
   },
   predictionsCard: {
     margin: 15,
@@ -207,6 +268,12 @@ const styles = StyleSheet.create({
   },
   progressBar: {
     height: 8,
+    borderRadius: 4,
+    backgroundColor: '#e0e0e0',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
     borderRadius: 4,
   },
   infoCard: {
