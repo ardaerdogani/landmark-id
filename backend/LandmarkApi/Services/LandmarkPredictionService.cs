@@ -4,6 +4,7 @@ using SixLabors.ImageSharp.Processing;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using LandmarkApi.Services;
 
 namespace LandmarkApi.Services;
 
@@ -12,6 +13,7 @@ public class LandmarkPrediction
     public required string Label { get; set; }
     public float Confidence { get; set; }
     public int Rank { get; set; }
+    public string? WikipediaUrl { get; set; } 
 }
 
 public class PredictionResult
@@ -29,17 +31,18 @@ public class PredictionResult
 /// </summary>
 public class LandmarkPredictionService : IDisposable
 {
-    private const string PythonScriptVersion = "2025-02-16_raw_uint8_v2";
+    private const string PythonScriptVersion = "2025-02-16_float32_fix";
     private readonly string[] _labels;
     private readonly string _modelPath;
     private readonly string _pythonPath;
     private const int ImageSize = 224;
     private readonly ILogger<LandmarkPredictionService> _logger;
+    private readonly WikipediaService _wikipediaService;
 
-    public LandmarkPredictionService(ILogger<LandmarkPredictionService> logger, IConfiguration configuration)
+    public LandmarkPredictionService(ILogger<LandmarkPredictionService> logger, IConfiguration configuration, WikipediaService wikipediaService)
     {
         _logger = logger;
-
+        _wikipediaService = wikipediaService;
         _modelPath = configuration["ModelPath"] ?? "Models/landmark_mnv3_int8_drq.tflite";
         var labelsPath = configuration["LabelsPath"] ?? "Models/labels.txt";
         _pythonPath = configuration["PythonPath"] ?? "/Users/rokas/Documents/KTU AI Masters/Team Project/.venv/bin/python";
@@ -99,6 +102,10 @@ public class LandmarkPredictionService : IDisposable
 
             // Call Python script
             var result = await RunPythonInference(tempImagePath);
+            foreach (var prediction in result.Predictions) {
+                prediction.WikipediaUrl = await _wikipediaService.GetWikipediaUrlAsync(prediction.Label);
+            }
+
 
             stopwatch.Stop();
             result.InferenceTimeMs = stopwatch.ElapsedMilliseconds;
@@ -158,15 +165,15 @@ public class LandmarkPredictionService : IDisposable
     }
 
     private async Task CreatePythonScript(string scriptPath)
-    {
-        var pythonScript = @"
+{
+    var pythonScript = @"
 import sys
 import json
 import numpy as np
 import tensorflow as tf
 from PIL import Image
 
-# version: 2025-02-16_raw_uint8_v2
+# version: 2025-02-16_float32_fix
 
 def predict(model_path, image_path):
     # Load TFLite model
@@ -181,14 +188,16 @@ def predict(model_path, image_path):
     num_classes = int(output_details['shape'][-1])
     if expected_classes is not None and num_classes != expected_classes:
         sys.stderr.write(
-            f'Label/model mismatch: model outputs {num_classes} classes but labels length is {expected_classes}\\n'
+            f'Label/model mismatch: model outputs {num_classes} classes but labels length is {expected_classes}\n'
         )
         sys.exit(1)
 
     # Load and preprocess image
     img = Image.open(image_path).convert('RGB').resize((224, 224), Image.Resampling.BILINEAR)
-    # Keep raw 0-255 inputs to match training/exported TFLite (uint8)
-    img_array = np.array(img, dtype=np.uint8)
+    img_array = np.array(img, dtype=np.float32)
+    
+    # Normalize to [0, 1] range
+    img_array = img_array / 255.0
     img_array = np.expand_dims(img_array, axis=0)
 
     # Run inference
@@ -214,9 +223,9 @@ def predict(model_path, image_path):
 if __name__ == '__main__':
     predict(sys.argv[1], sys.argv[2])
 ";
-        await File.WriteAllTextAsync(scriptPath, pythonScript);
-        _logger.LogInformation($"Created Python inference script at {scriptPath}");
-    }
+    await File.WriteAllTextAsync(scriptPath, pythonScript);
+    _logger.LogInformation($"Created Python inference script at {scriptPath}");
+}
 
     public void Dispose()
     {
