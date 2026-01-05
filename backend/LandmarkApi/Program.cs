@@ -1,6 +1,7 @@
 using LandmarkApi.Services;
 using LandmarkApi.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,11 +47,24 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(optio
 var app = builder.Build();
 
 // Auto-migrate database on startup
+// Auto-create database schema on startup (Development reset)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<LandmarkDbContext>();
-    db.Database.Migrate();
-    app.Logger.LogInformation("Database migrated successfully");
+
+    if (app.Environment.IsDevelopment())
+    {
+        // Clears everything and recreates tables from current model
+        db.Database.EnsureDeleted();
+        db.Database.EnsureCreated();
+
+        app.Logger.LogInformation("Database reset (EnsureDeleted/EnsureCreated) in Development");
+    }
+    else
+    {
+        db.Database.Migrate();
+        app.Logger.LogInformation("Database migrated successfully");
+    }
 }
 
 // Configure the HTTP request pipeline
@@ -62,6 +76,14 @@ if (app.Environment.IsDevelopment())
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Landmark API v1");
     });
 }
+
+app.MapGet("/debug/actions", (IActionDescriptorCollectionProvider provider) =>
+{
+    return provider.ActionDescriptors.Items
+        .Select(a => a.DisplayName)
+        .OrderBy(x => x)
+        .ToArray();
+});
 
 app.UseHttpsRedirection();
 app.UseCors("AllowAll");

@@ -1,5 +1,9 @@
 {
   "dependencies": {
-    "seaborn": "^0.0.1-security"
+    "seaborn": "^0.0.1-security",
+    "expo": "~54.0.30",
+    "expo-camera": "~17.0.10",
+    "expo-image-picker": "~17.0.10",
+    "expo-status-bar": "~3.0.9"
   }
 }

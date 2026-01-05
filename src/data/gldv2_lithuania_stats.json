@@ -1,0 +1,8 @@
+{
+  "total_landmarks_queried": 799,
+  "top_n_selected": 5,
+  "min_images_in_top_n": 91,
+  "max_images_in_top_n": 356,
+  "avg_images_in_top_n": 200.6,
+  "total_images_for_training": 1003
+}

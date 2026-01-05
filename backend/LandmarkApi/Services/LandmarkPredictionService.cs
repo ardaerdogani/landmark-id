@@ -4,7 +4,6 @@ using SixLabors.ImageSharp.Processing;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using LandmarkApi.Services;
 
 namespace LandmarkApi.Services;
 
@@ -13,53 +12,66 @@ public class LandmarkPrediction
     public required string Label { get; set; }
     public float Confidence { get; set; }
     public int Rank { get; set; }
-    public string? WikipediaUrl { get; set; } 
+    public string? WikipediaUrl { get; set; }
 }
 
 public class PredictionResult
 {
     public required List<LandmarkPrediction> Predictions { get; set; }
     public long InferenceTimeMs { get; set; }
+    public int? PredictionRecordId { get; set; }
 }
 
 /// <summary>
-/// Landmark prediction service using Python TFLite interpreter via subprocess
-/// Note: This is a bridge solution. For production, consider:
-/// 1. Converting model to ONNX format and using Microsoft.ML.OnnxRuntime
-/// 2. Using TensorFlow.NET (if stable for your platform)
-/// 3. Creating a separate Python microservice
+/// Landmark prediction service using Python TFLite interpreter via subprocess.
 /// </summary>
 public class LandmarkPredictionService : IDisposable
 {
-    private const string PythonScriptVersion = "2025-02-16_float32_fix";
+    // Bump this whenever you change the embedded python to force refresh.
+    private const string PythonScriptVersion = "2026-01-03_backend_input_fix_v1";
+
     private readonly string[] _labels;
     private readonly string _modelPath;
     private readonly string _pythonPath;
     private const int ImageSize = 224;
+
     private readonly ILogger<LandmarkPredictionService> _logger;
     private readonly WikipediaService _wikipediaService;
 
-    public LandmarkPredictionService(ILogger<LandmarkPredictionService> logger, IConfiguration configuration, WikipediaService wikipediaService)
+    public LandmarkPredictionService(
+        ILogger<LandmarkPredictionService> logger,
+        IConfiguration configuration,
+        WikipediaService wikipediaService)
     {
         _logger = logger;
         _wikipediaService = wikipediaService;
-        _modelPath = configuration["ModelPath"] ?? "Models/landmark_mnv3_int8_drq.tflite";
-        var labelsPath = configuration["LabelsPath"] ?? "Models/labels.txt";
-        _pythonPath = configuration["PythonPath"] ?? "/Users/rokas/Documents/KTU AI Masters/Team Project/.venv/bin/python";
 
-        _logger.LogInformation($"Model path: {_modelPath}");
-        _logger.LogInformation($"Labels path: {labelsPath}");
+        // IMPORTANT: use config if provided (your appsettings.json points to fp32)
+        var modelRel = configuration["ModelPath"] ?? "Models/landmark_mnv3_fp32.tflite";
+        var labelsRel = configuration["LabelsPath"] ?? "Models/labels.txt";
+        _pythonPath = configuration["PythonPath"] ?? "python";
+
+        static string Resolve(string p) =>
+            Path.IsPathRooted(p) ? p : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, p));
+
+        _modelPath = Resolve(modelRel);
+        var labelsPath = Resolve(labelsRel);
+
+        _logger.LogInformation("Model path (resolved): {ModelPath}", _modelPath);
+        _logger.LogInformation("Labels path (resolved): {LabelsPath}", labelsPath);
 
         if (!File.Exists(_modelPath))
-            throw new FileNotFoundException($"Model file not found: {_modelPath}");
+            throw new FileNotFoundException($"Model file not found: {modelRel}", _modelPath);
 
         if (!File.Exists(labelsPath))
-            throw new FileNotFoundException($"Labels file not found: {labelsPath}");
+            throw new FileNotFoundException($"Labels file not found: {labelsRel}", labelsPath);
 
-        // Load labels
-        _labels = File.ReadAllLines(labelsPath);
+        _labels = File.ReadAllLines(labelsPath)
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToArray();
 
-        _logger.LogInformation($"Service initialized. {_labels.Length} classes detected");
+        _logger.LogInformation("Service initialized. {ClassCount} classes detected", _labels.Length);
     }
 
     public async Task<PredictionResult> PredictAsync(Stream imageStream)
@@ -68,19 +80,20 @@ public class LandmarkPredictionService : IDisposable
 
         // Save image temporarily
         var tempImagePath = Path.Combine(Path.GetTempPath(), $"temp_image_{Guid.NewGuid()}.jpg");
+
         try
         {
-            // Load and preprocess image
+            // Load and preprocess image (force RGB and resize to 224x224)
             using (var image = await Image.LoadAsync<Rgb24>(imageStream))
             {
-                // Resize to 224x224
                 image.Mutate(x => x.Resize(ImageSize, ImageSize));
                 await image.SaveAsJpegAsync(tempImagePath);
             }
 
-            // Create Python script path
+            // Python script path in runtime base dir (same place we execute from)
             var scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "predict_tflite.py");
 
+            // Ensure python script is up-to-date
             var scriptNeedsRefresh = true;
             if (File.Exists(scriptPath))
             {
@@ -89,11 +102,12 @@ public class LandmarkPredictionService : IDisposable
                     var content = await File.ReadAllTextAsync(scriptPath);
                     scriptNeedsRefresh = !content.Contains(PythonScriptVersion);
                 }
-                catch (Exception)
+                catch
                 {
                     scriptNeedsRefresh = true;
                 }
             }
+
             if (scriptNeedsRefresh)
             {
                 _logger.LogWarning("Creating/refreshing Python inference script...");
@@ -102,10 +116,12 @@ public class LandmarkPredictionService : IDisposable
 
             // Call Python script
             var result = await RunPythonInference(tempImagePath);
-            foreach (var prediction in result.Predictions) {
+
+            // Enrich with Wikipedia URLs
+            foreach (var prediction in result.Predictions)
+            {
                 prediction.WikipediaUrl = await _wikipediaService.GetWikipediaUrlAsync(prediction.Label);
             }
-
 
             stopwatch.Stop();
             result.InferenceTimeMs = stopwatch.ElapsedMilliseconds;
@@ -117,7 +133,7 @@ public class LandmarkPredictionService : IDisposable
             // Clean up temp file
             if (File.Exists(tempImagePath))
             {
-                File.Delete(tempImagePath);
+                try { File.Delete(tempImagePath); } catch { /* ignore */ }
             }
         }
     }
@@ -139,28 +155,40 @@ public class LandmarkPredictionService : IDisposable
         using var process = new Process { StartInfo = psi };
         process.Start();
 
-        var output = await process.StandardOutput.ReadToEndAsync();
-        var error = await process.StandardError.ReadToEndAsync();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+
         await process.WaitForExitAsync();
 
+        var output = await outputTask;
+        var error = await errorTask;
+
+        // Keep stderr visible for debugging (quantization, x_min/x_max, etc.)
+        if (!string.IsNullOrWhiteSpace(error))
+            _logger.LogInformation("Python stderr: {Stderr}", error.Trim());
+
         if (process.ExitCode != 0)
-        {
-            throw new Exception($"Python inference failed: {error}");
-        }
+            throw new Exception($"Python inference failed (exit {process.ExitCode}): {error}");
 
         // Parse JSON output from Python script
         var predictions = JsonSerializer.Deserialize<List<PythonPrediction>>(output)
-            ?? throw new Exception("Failed to parse Python output");
+            ?? throw new Exception($"Failed to parse Python output. Raw: {output}");
+
+        var mapped = predictions.Select((p, idx) =>
+        {
+            var safeIndex = Math.Clamp(p.ClassIndex, 0, _labels.Length - 1);
+            return new LandmarkPrediction
+            {
+                Label = _labels[safeIndex],
+                Confidence = p.Confidence,
+                Rank = idx + 1
+            };
+        }).ToList();
 
         return new PredictionResult
         {
-            Predictions = predictions.Select((p, idx) => new LandmarkPrediction
-            {
-                Label = _labels[p.ClassIndex],
-                Confidence = p.Confidence,
-                Rank = idx + 1
-            }).ToList(),
-            InferenceTimeMs = 0 // Will be set by caller
+            Predictions = mapped,
+            InferenceTimeMs = 0 // set by caller
         };
     }
 
@@ -173,66 +201,76 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image
 
-# version: 2025-02-16_float32_fix
+# version: 2026-01-03_backend_input_fix_v3
 
 def predict(model_path, image_path):
-    # Load TFLite model
     interpreter = tf.lite.Interpreter(model_path=model_path)
     interpreter.allocate_tensors()
 
-    input_details = interpreter.get_input_details()[0]
-    output_details = interpreter.get_output_details()[0]
+    ide = interpreter.get_input_details()[0]
+    ode = interpreter.get_output_details()[0]
     expected_classes = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
-    # Validate model output dimension against labels
-    num_classes = int(output_details['shape'][-1])
+    num_classes = int(ode['shape'][-1])
     if expected_classes is not None and num_classes != expected_classes:
         sys.stderr.write(
             f'Label/model mismatch: model outputs {num_classes} classes but labels length is {expected_classes}\n'
         )
         sys.exit(1)
 
-    # Load and preprocess image
     img = Image.open(image_path).convert('RGB').resize((224, 224), Image.Resampling.BILINEAR)
-    img_array = np.array(img, dtype=np.float32)
-    
-    # Normalize to [0, 1] range
-    img_array = img_array / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
 
-    # Run inference
-    interpreter.set_tensor(input_details['index'], img_array)
+    # IMPORTANT: keep 0..255 float32 (model has preprocess inside)
+    x = np.array(img, dtype=np.float32)[None, ...]
+
+    # ---- SAFE DEBUG (no nested quotes) ----
+    try:
+        in_dtype = ide['dtype']
+        in_quant = ide.get('quantization')
+        x_min = float(x.min())
+        x_max = float(x.max())
+        sys.stderr.write(
+            f'[debug] in_dtype={in_dtype} in_quant={in_quant} x_min={x_min:.1f} x_max={x_max:.1f}\n'
+        )
+    except Exception:
+        pass
+
+    # Quantize input if needed
+    if ide['dtype'] in (np.uint8, np.int8):
+        scale, zp = ide.get('quantization', (0.0, 0))
+        if scale and scale != 0:
+            x = np.round(x / scale + zp).astype(ide['dtype'])
+        else:
+            x = x.astype(ide['dtype'])
+
+    interpreter.set_tensor(ide['index'], x)
     interpreter.invoke()
-    output = interpreter.get_tensor(output_details['index'])[0]
 
-    # Dequantize if necessary so confidences are meaningful
-    if output_details['dtype'] in (np.uint8, np.int8):
-        scale, zero_point = output_details['quantization']
-        if scale is not None:
-            scale_val = scale if np.isscalar(scale) else float(scale[0])
-            zero_val = zero_point if np.isscalar(zero_point) else int(zero_point[0])
-            if scale_val != 0:
-                output = (output.astype(np.float32) - zero_val) * scale_val
+    out = interpreter.get_tensor(ode['index'])[0]
 
-    # Get top-3
-    top3_idx = np.argsort(output)[-3:][::-1]
-    result = [{'class_index': int(idx), 'confidence': float(output[idx])} for idx in top3_idx]
+    # Dequantize output if needed
+    if ode['dtype'] in (np.uint8, np.int8):
+        scale, zp = ode.get('quantization', (0.0, 0))
+        if scale and scale != 0:
+            out = (out.astype(np.float32) - zp) * scale
 
+    top3_idx = np.argsort(out)[-3:][::-1]
+    result = [{'class_index': int(idx), 'confidence': float(out[idx])} for idx in top3_idx]
     print(json.dumps(result))
 
 if __name__ == '__main__':
     predict(sys.argv[1], sys.argv[2])
 ";
     await File.WriteAllTextAsync(scriptPath, pythonScript);
-    _logger.LogInformation($"Created Python inference script at {scriptPath}");
+    _logger.LogInformation("Created Python inference script at {ScriptPath}", scriptPath);
 }
 
     public void Dispose()
     {
-        // Cleanup if needed
+        // nothing to dispose
     }
 
-    private class PythonPrediction
+    private sealed class PythonPrediction
     {
         [JsonPropertyName("class_index")]
         public int ClassIndex { get; set; }

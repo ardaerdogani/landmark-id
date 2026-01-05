@@ -1,11 +1,6 @@
-landmark_name,image_count,label_id
-Trakai_Island_Castle,356,31837
-Hill_of_Crosses,268,45871
-Rasos_Cemetery,155,38952
-IX_Fort,133,124587
-Parnid%C5%BEio_kopa,91,18750
-Gediminas_Tower,90,107649
-Zarasas,89,168590
-Freedom_Avenue_(Kaunas),74,92962
-U%C5%BEupis,72,110192
-Gate_of_Dawn,72,138233
+landmark_name,image_count
+Trakai_Island_Castle,356
+Hill_of_Crosses,268
+Rasos_Cemetery,155
+IX_Fort,133
+Parnid%C5%BEio_kopa,91

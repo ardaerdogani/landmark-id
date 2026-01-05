@@ -1,4 +1,3 @@
-import json
 import math
 import os
 import pathlib
@@ -11,23 +10,24 @@ from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
 
-
-
+# =========================
+# Config (override via env)
+# =========================
 CONFIG = {
-    "arch": "MobileNetV3Small",
+    "arch": "MobileNetV3Large",
     "img_size": 224,
     "batch": 32,
     "epochs": 10,
     "optimizer": "AdamW",
-    "lr": 1e-3,
+    "lr": 3e-4,
     "weight_decay": 1e-4,
-    "augment": "flip,zoom,brightness,contrast",
     "seed": 42,
     "fine_tune_epochs": 10,
-    "fine_tune_unfreeze_layers": 80,
-    "fine_tune_lr": 2e-5,
+    "fine_tune_unfreeze_layers": 60,
+    "fine_tune_lr": 1e-5,
+    "use_class_weight": True,
+    "label_smoothing": 0.0,
 }
 
 
@@ -41,108 +41,185 @@ def _safe_override(env_key: str, cast_fn, target_key: str):
         print(f"Warning: Invalid value for {env_key}='{raw_value}', keeping {target_key}={CONFIG[target_key]}")
 
 
+_safe_override("LANDMARK_IMG_SIZE", int, "img_size")
 _safe_override("LANDMARK_EPOCHS", int, "epochs")
 _safe_override("LANDMARK_FINE_TUNE_EPOCHS", lambda v: max(0, int(v)), "fine_tune_epochs")
 _safe_override("LANDMARK_BATCH", lambda v: max(1, int(v)), "batch")
 _safe_override("BATCH_SIZE", lambda v: max(1, int(v)), "batch")
-_safe_override("LANDMARK_SHUFFLE_FRAC", float, "shuffle_frac")
+_safe_override("LANDMARK_LR", float, "lr")
+_safe_override("LANDMARK_WEIGHT_DECAY", float, "weight_decay")
 _safe_override("LANDMARK_FINE_TUNE_UNFREEZE", lambda v: int(v), "fine_tune_unfreeze_layers")
 _safe_override("LANDMARK_FINE_TUNE_LR", float, "fine_tune_lr")
+_safe_override("LANDMARK_USE_CLASS_WEIGHT", lambda v: str(v).strip().lower() in ("1", "true", "yes", "y"), "use_class_weight")
+_safe_override("LANDMARK_LABEL_SMOOTHING", float, "label_smoothing")
 
 CFG = SimpleNamespace(**CONFIG)
 
 tf.keras.utils.set_random_seed(CFG.seed)
 
+# -------------------------
+# Paths
+# -------------------------
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+DATA_ROOT = pathlib.Path(os.getenv("LANDMARK_DATA_ROOT", str(REPO_ROOT / "src" / "roboflow_dataset")))
+LABELS_PATH = pathlib.Path(os.getenv("LANDMARK_LABELS_PATH", str(DATA_ROOT / "labels.txt")))
+MODELS_DIR = pathlib.Path(os.getenv("LANDMARK_MODELS_DIR", str(REPO_ROOT / "models")))
+REPORTS_DIR = pathlib.Path(os.getenv("LANDMARK_REPORTS_DIR", str(REPO_ROOT / "reports")))
+
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# TensorBoard
 log_root = pathlib.Path(os.path.expanduser(os.getenv("LANDMARK_TB_ROOT", "tb_logs")))
 timestamp = os.getenv("LANDMARK_TB_RUN") or datetime.now().strftime("%Y%m%d-%H%M%S")
 LOG_DIR = log_root / f"landmark_mnv3_{timestamp}"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-print("\n" + "=" * 60)
-print("CONFIG")
-print("=" * 60)
+print("\n" + "=" * 70)
+print("TRAIN CONFIG")
+print("=" * 70)
 for k, v in CONFIG.items():
     print(f"{k}: {v}")
-print(f"\n✓ TensorBoard logging: {LOG_DIR}")
-print("=" * 60 + "\n")
+print(f"DATA_ROOT: {DATA_ROOT}")
+print(f"LABELS_PATH: {LABELS_PATH}")
+print(f"MODELS_DIR: {MODELS_DIR}")
+print(f"REPORTS_DIR: {REPORTS_DIR}")
+print(f"✓ TensorBoard logging: {LOG_DIR}")
+print("=" * 70 + "\n")
 
+
+# =========================
+# Helpers
+# =========================
 IMG_SIZE = (CFG.img_size, CFG.img_size)
-
-# Load streaming datasets
-train_ds, class_names, train_samples = get_tf_datasets(
-    "train", img_size=CFG.img_size, batch=CFG.batch, seed=CFG.seed
-)
-val_ds, _, val_samples = get_tf_datasets("val", img_size=CFG.img_size, batch=CFG.batch, seed=CFG.seed)
-test_ds, _, test_samples = get_tf_datasets("test", img_size=CFG.img_size, batch=CFG.batch, seed=CFG.seed)
-
-class_names = sorted(class_names)
 AUTOTUNE = tf.data.AUTOTUNE
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-# Optional: mix locally captured mobile photos into the training stream.
-mobile_dir = os.getenv("LANDMARK_MOBILE_DIR")
-mobile_weight_raw = os.getenv("LANDMARK_MOBILE_WEIGHT", "0.3")
-try:
-    mobile_weight = float(mobile_weight_raw)
-except ValueError:
-    print(f"[train_keras_tensorboard] Invalid LANDMARK_MOBILE_WEIGHT='{mobile_weight_raw}', defaulting to 0.3")
-    mobile_weight = 0.3
-mobile_weight = min(max(mobile_weight, 0.0), 0.95)
-if mobile_dir:
-    try:
-        from src.GLDV2_ds.mobile_folder_dataset import build_mobile_dataset
 
-        mobile_ds, mobile_samples = build_mobile_dataset(
-            mobile_dir, class_names, CFG.img_size, CFG.batch, CFG.seed
-        )
-    except Exception as exc:  # pragma: no cover - defensive guard
-        mobile_ds, mobile_samples = (None, 0)
-        print(f"[train_keras_tensorboard] Failed to load mobile dataset: {exc}")
+def _read_labels(p: pathlib.Path) -> list[str]:
+    if not p.exists():
+        return []
+    lines = []
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        lines.append(ln)
+    return lines
 
-    if mobile_ds is not None and mobile_samples:
-        weights = [1.0 - mobile_weight, mobile_weight]
-        train_ds = tf.data.Dataset.sample_from_datasets(
-            [train_ds, mobile_ds],
-            weights=weights,
-            seed=CFG.seed,
-        )
-        train_samples += mobile_samples
-        print(
-            f"[train_keras_tensorboard] Mixing GLDv2 + {mobile_samples} mobile frames with weight={mobile_weight:.2f}"
-        )
+
+def _infer_labels_from_train(train_dir: pathlib.Path) -> list[str]:
+    return sorted([d.name for d in train_dir.iterdir() if d.is_dir()])
+
+
+def _count_images(dir_path: pathlib.Path) -> int:
+    if not dir_path.exists():
+        return 0
+    return sum(1 for f in dir_path.rglob("*") if f.is_file() and f.suffix.lower() in IMAGE_EXTS)
+
+
+def _resolve_split_dirs(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    train_dir = root / "train"
+    # Roboflow uses "valid" (not "val")
+    val_dir = root / "valid" if (root / "valid").exists() else (root / "val")
+    test_dir = root / "test"
+    if not train_dir.exists():
+        raise SystemExit(f"Missing train dir: {train_dir}")
+    if not val_dir.exists():
+        raise SystemExit(f"Missing validation dir: {val_dir} (expected 'valid' or 'val')")
+    if not test_dir.exists():
+        raise SystemExit(f"Missing test dir: {test_dir}")
+    return train_dir, val_dir, test_dir
+
+
+# =========================
+# Load datasets (Roboflow)
+# =========================
+train_dir, val_dir, test_dir = _resolve_split_dirs(DATA_ROOT)
+
+class_names = _read_labels(LABELS_PATH)
+if not class_names:
+    class_names = _infer_labels_from_train(train_dir)
+    LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LABELS_PATH.write_text("\n".join(class_names) + "\n", encoding="utf-8")
+    print(f"[train] Wrote inferred labels to {LABELS_PATH}")
+
+print(f"[train] num_classes={len(class_names)}")
+if len(class_names) < 2:
+    raise SystemExit("Need at least 2 classes to train.")
+
+# IMPORTANT: we pass class_names=... to lock the index order
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    train_dir,
+    labels="inferred",
+    label_mode="categorical",
+    class_names=class_names,
+    image_size=IMG_SIZE,
+    batch_size=CFG.batch,
+    shuffle=True,
+    seed=CFG.seed,
+)
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    val_dir,
+    labels="inferred",
+    label_mode="categorical",
+    class_names=class_names,
+    image_size=IMG_SIZE,
+    batch_size=CFG.batch,
+    shuffle=False,
+)
+test_ds = tf.keras.utils.image_dataset_from_directory(
+    test_dir,
+    labels="inferred",
+    label_mode="categorical",
+    class_names=class_names,
+    image_size=IMG_SIZE,
+    batch_size=CFG.batch,
+    shuffle=False,
+)
+
+train_samples = _count_images(train_dir)
+val_samples = _count_images(val_dir)
+test_samples = _count_images(test_dir)
+
+train_steps = max(1, math.ceil(train_samples / CFG.batch))
+val_steps = max(1, math.ceil(val_samples / CFG.batch))
+test_steps = max(1, math.ceil(test_samples / CFG.batch))
+
+print(f"[train] samples -> train={train_samples}, val={val_samples}, test={test_samples}")
+print(f"[train] steps_per_epoch -> train={train_steps}, val={val_steps}, test={test_steps}")
 
 train_ds = train_ds.prefetch(AUTOTUNE)
 val_ds = val_ds.prefetch(AUTOTUNE)
 test_ds = test_ds.prefetch(AUTOTUNE)
 
-train_steps = max(1, math.ceil(train_samples / CFG.batch))
-val_steps = max(1, math.ceil(val_samples / CFG.batch))
-test_steps = max(1, math.ceil(test_samples / CFG.batch))
-print(f"[train_keras_tensorboard] steps_per_epoch -> train={train_steps}, val={val_steps}, test={test_steps}")
+# =========================
+# class_weight (optional)
+# =========================
+class_weight = None
+if CFG.use_class_weight:
+    counts = {name: _count_images(train_dir / name) for name in class_names}
+    total = sum(counts.values())
+    # inverse-frequency; guard against zero
+    class_weight = {
+        i: (total / (len(class_names) * max(1, counts[name])))
+        for i, name in enumerate(class_names)
+    }
+    print("[train] class counts:", counts)
 
-# === class_weight (inverse-frequency) ===
-metadata_file = pathlib.Path("data/metadata.json")
-with open(metadata_file, "r") as f:
-    metadata = json.load(f)
-counts = {name: len(imgs) for name, imgs in metadata.items()}
-total = sum(counts.values())
-class_weight = {i: total / (len(class_names) * counts[name]) for i, name in enumerate(class_names)}
 
-# ==== Augment ====
+# =========================
+# Augment + Model
+# =========================
 data_augment = keras.Sequential(
     [
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.08, fill_mode="reflect"),
-        layers.RandomTranslation(0.08, 0.08, fill_mode="reflect"),
-        layers.RandomZoom(height_factor=(-0.15, 0.2), width_factor=(-0.15, 0.2), fill_mode="reflect"),
-        layers.RandomBrightness(0.2),
-        layers.RandomContrast(0.15),
-        layers.GaussianNoise(0.05),
+        layers.RandomBrightness(0.15),
+        layers.RandomContrast(0.1),
     ],
     name="aug",
 )
 
-# ==== Model ====
-base = keras.applications.MobileNetV3Small(
+base = keras.applications.MobileNetV3Large(
     input_shape=IMG_SIZE + (3,), include_top=False, weights="imagenet"
 )
 base.trainable = False
@@ -152,11 +229,15 @@ x = data_augment(inputs)
 x = keras.applications.mobilenet_v3.preprocess_input(x)
 x = base(x, training=False)
 x = layers.GlobalAveragePooling2D()(x)
-x = layers.Dropout(0.1)(x)
+x = layers.Dropout(0.2)(x)
 outputs = layers.Dense(len(class_names), activation="softmax")(x)
 model = keras.Model(inputs, outputs)
 
-opt = keras.optimizers.AdamW(learning_rate=CFG.lr, weight_decay=CFG.weight_decay)
+if str(CFG.optimizer).lower() == "adamw":
+    opt = keras.optimizers.AdamW(learning_rate=CFG.lr, weight_decay=CFG.weight_decay)
+else:
+    opt = keras.optimizers.Adam(learning_rate=CFG.lr)
+
 model.compile(
     optimizer=opt,
     loss="categorical_crossentropy",
@@ -166,35 +247,9 @@ model.compile(
     ],
 )
 
-os.makedirs("models", exist_ok=True)
-
-
-def build_callbacks(prefix: str):
-    checkpoint = keras.callbacks.ModelCheckpoint(
-        filepath=f"models/{prefix}ckpt_{{epoch:02d}}_{{val_loss:.3f}}.keras",
-        monitor="val_loss",
-        mode="min",
-        save_best_only=True,
-        save_weights_only=False,
-    )
-    plateau = keras.callbacks.ReduceLROnPlateau(
-        monitor="val_loss",
-        mode="min",
-        factor=0.2,
-        patience=2,
-        min_lr=1e-7,
-        verbose=1,
-    )
-    early_stop = keras.callbacks.EarlyStopping(
-        monitor="val_loss",
-        mode="min",
-        patience=4,
-        restore_best_weights=True,
-        verbose=1,
-    )
-    return checkpoint, plateau, early_stop
-
-
+# =========================
+# Callbacks
+# =========================
 tensorboard_cb = keras.callbacks.TensorBoard(
     log_dir=str(LOG_DIR),
     histogram_freq=1,
@@ -203,13 +258,39 @@ tensorboard_cb = keras.callbacks.TensorBoard(
     write_images=False,
 )
 
-phase1_ckpt, phase1_plateau, phase1_early = build_callbacks(prefix="phase1_")
-phase1_callbacks = [tensorboard_cb, phase1_ckpt, phase1_plateau, phase1_early]
+phase1_best = MODELS_DIR / "phase1_best.keras"
+phase2_best = MODELS_DIR / "phase2_best.keras"
 
-# ======= Training =======
-print("\n" + "=" * 60)
-print("STARTING TRAINING")
-print("=" * 60 + "\n")
+phase1_ckpt = keras.callbacks.ModelCheckpoint(
+    filepath=str(phase1_best),
+    monitor="val_loss",
+    mode="min",
+    save_best_only=True,
+    save_weights_only=False,
+)
+
+plateau = keras.callbacks.ReduceLROnPlateau(
+    monitor="val_loss",
+    mode="min",
+    factor=0.2,
+    patience=2,
+    min_lr=1e-7,
+    verbose=1,
+)
+
+early_stop = keras.callbacks.EarlyStopping(
+    monitor="val_loss",
+    mode="min",
+    patience=4,
+    restore_best_weights=True,
+    verbose=1,
+)
+
+phase1_callbacks = [tensorboard_cb, phase1_ckpt, plateau, early_stop]
+
+print("\n" + "=" * 70)
+print("STARTING TRAINING (phase 1: frozen backbone)")
+print("=" * 70 + "\n")
 
 history = model.fit(
     train_ds,
@@ -218,55 +299,52 @@ history = model.fit(
     callbacks=phase1_callbacks,
     verbose=1,
     class_weight=class_weight,
-    steps_per_epoch=train_steps,
-    validation_steps=val_steps,
 )
 
-# === Fine-tune stage ===
+# Reload best phase1 model if available
+if phase1_best.exists():
+    model = tf.keras.models.load_model(phase1_best)
+    print(f"[train] Loaded best phase1 model from {phase1_best}")
+
+# =========================
+# Fine-tune
+# =========================
 if CFG.fine_tune_epochs > 0:
-    best_epoch_idx = None
-    best_checkpoint_path = None
-    if history and history.history.get("val_loss"):
-        best_epoch_idx = int(np.argmin(history.history["val_loss"]))
-        best_val_loss = history.history["val_loss"][best_epoch_idx]
-        best_checkpoint_path = pathlib.Path("models") / f"phase1_ckpt_{best_epoch_idx + 1:02d}_{best_val_loss:.3f}.keras"
-        if best_checkpoint_path.exists():
-            model = tf.keras.models.load_model(best_checkpoint_path)
-            print(f"Loaded weights from {best_checkpoint_path}")
-        else:
-            print(f"Warning: Expected checkpoint {best_checkpoint_path} not found; proceeding with current weights.")
-    else:
-        print("Warning: No validation loss history available; skipping checkpoint reload before fine-tune.")
+    print("\n" + "=" * 70)
+    print("FINE-TUNING (phase 2: unfreeze last layers)")
+    print("=" * 70 + "\n")
 
     base.trainable = True
 
+    # freeze everything first
     for layer in base.layers:
         layer.trainable = False
 
-    if CFG.fine_tune_unfreeze_layers <= 0:
-        layers_to_unfreeze = len(base.layers)
-    else:
-        layers_to_unfreeze = min(len(base.layers), CFG.fine_tune_unfreeze_layers)
-
+    # unfreeze last N (except BatchNorm)
+    layers_to_unfreeze = len(base.layers) if CFG.fine_tune_unfreeze_layers <= 0 else min(len(base.layers), CFG.fine_tune_unfreeze_layers)
     for layer in base.layers[-layers_to_unfreeze:]:
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
         else:
             layer.trainable = True
 
-    opt_ft = keras.optimizers.Adam(learning_rate=CFG.fine_tune_lr)
-
     model.compile(
-        optimizer=opt_ft,
-        loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
+        optimizer=keras.optimizers.Adam(learning_rate=CFG.fine_tune_lr),
+        loss=keras.losses.CategoricalCrossentropy(label_smoothing=float(CFG.label_smoothing)),
         metrics=[
             keras.metrics.CategoricalAccuracy(name="top1"),
             keras.metrics.TopKCategoricalAccuracy(k=3, name="top3"),
         ],
     )
 
-    phase2_ckpt, phase2_plateau, phase2_early = build_callbacks(prefix="phase2_")
-    ft_callbacks = [tensorboard_cb, phase2_ckpt, phase2_plateau, phase2_early]
+    phase2_ckpt = keras.callbacks.ModelCheckpoint(
+        filepath=str(phase2_best),
+        monitor="val_loss",
+        mode="min",
+        save_best_only=True,
+        save_weights_only=False,
+    )
+    ft_callbacks = [tensorboard_cb, phase2_ckpt, plateau, early_stop]
 
     model.fit(
         train_ds,
@@ -274,56 +352,56 @@ if CFG.fine_tune_epochs > 0:
         epochs=CFG.fine_tune_epochs,
         callbacks=ft_callbacks,
         verbose=2,
-        class_weight=class_weight,
-        steps_per_epoch=train_steps,
-        validation_steps=val_steps,
+        class_weight=class_weight
     )
-else:
-    print("Skipping fine-tune stage (fine_tune_epochs=0)")
 
-# ======= Test Evaluation =======
-test_metrics = model.evaluate(test_ds, steps=test_steps, verbose=0)
+    if phase2_best.exists():
+        model = tf.keras.models.load_model(phase2_best)
+        print(f"[train] Loaded best phase2 model from {phase2_best}")
+else:
+    print("[train] Skipping fine-tune stage (fine_tune_epochs=0)")
+
+# =========================
+# Evaluate on test
+# =========================
+test_metrics = model.evaluate(test_ds, verbose=0)
 metrics_dict = {f"test_{name}": float(val) for name, val in zip(model.metrics_names, test_metrics)}
 print(f"\nTest Metrics: {metrics_dict}")
 
-# ======= Confusion Matrix =======
+# Confusion matrix + report
 y_true, y_pred = [], []
-test_ds_for_metrics, _, _ = get_tf_datasets("test", img_size=CFG.img_size, batch=CFG.batch, seed=CFG.seed)
-test_ds_for_metrics = test_ds_for_metrics.prefetch(AUTOTUNE)
-
-for bx, by in test_ds_for_metrics:
+for bx, by in test_ds:
     preds = model.predict(bx, verbose=0)
     y_true.extend(np.argmax(by.numpy(), axis=1))
     y_pred.extend(np.argmax(preds, axis=1))
+
 cm = confusion_matrix(y_true, y_pred)
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-os.makedirs("reports", exist_ok=True)
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm, annot=True, fmt="d", xticklabels=class_names, yticklabels=class_names)
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=False, fmt="d", xticklabels=class_names, yticklabels=class_names)
 plt.xlabel("Pred")
 plt.ylabel("True")
 plt.tight_layout()
-cm_path = pathlib.Path("reports/confusion_matrix.png")
+
+cm_path = REPORTS_DIR / "confusion_matrix.png"
 plt.savefig(cm_path, dpi=200)
 plt.close()
 print(f"Confusion matrix saved to {cm_path}")
 
-# ======= Classification Report =======
-report_text = classification_report(y_true, y_pred, target_names=class_names)
-print("\n" + "=" * 60)
+report_text = classification_report(y_true, y_pred, target_names=class_names, digits=4)
+print("\n" + "=" * 70)
 print("CLASSIFICATION REPORT")
-print("=" * 60)
+print("=" * 70)
 print(report_text)
 
-report_path = pathlib.Path("reports/classification_report.txt")
-with open(report_path, "w") as f:
-    f.write(report_text)
+report_path = REPORTS_DIR / "classification_report.txt"
+report_path.write_text(report_text, encoding="utf-8")
 print(f"Classification report saved to {report_path}")
 
-
+# Log eval to TensorBoard
 def log_evaluation_to_tensorboard(metrics, confusion_matrix_path, report_str):
     eval_dir = LOG_DIR / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -343,14 +421,23 @@ def log_evaluation_to_tensorboard(metrics, confusion_matrix_path, report_str):
 log_evaluation_to_tensorboard(metrics_dict, cm_path, report_text)
 print(f"TensorBoard evaluation summaries written to {LOG_DIR / 'evaluation'}")
 
-# ======= Save Model =======
-model.save("models/landmark_mnv3.keras")
-print("✓ Model saved to models/landmark_mnv3.keras")
+# =========================
+# Save final model + labels
+# =========================
+final_model_path = MODELS_DIR / "landmark_mnv3.keras"
+model.save(final_model_path)
+print(f"✓ Model saved to {final_model_path}")
 
-print("Files saved:")
-print("  - models/landmark_mnv3.keras (final model)")
-print("  - models/ckpt_*.keras (best checkpoints)")
-print("  - reports/confusion_matrix.png (evaluation)")
-print("  - reports/classification_report.txt (evaluation)")
+# Save labels used for training in the same order as model outputs
+labels_out = MODELS_DIR / "labels.txt"
+labels_out.write_text("\n".join(class_names) + "\n", encoding="utf-8")
+print(f"✓ Labels saved to {labels_out}")
+
+print("\nFiles saved:")
+print(f"  - {final_model_path}")
+print(f"  - {phase1_best} (best phase1)")
+print(f"  - {phase2_best} (best phase2, if fine-tuned)")
+print(f"  - {labels_out}")
+print(f"  - {cm_path}")
+print(f"  - {report_path}")
 print("  - TensorBoard logs at", LOG_DIR)
-print("=" * 60 + "\n")

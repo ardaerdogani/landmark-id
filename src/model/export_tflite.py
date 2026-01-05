@@ -13,7 +13,8 @@ except Exception:
 
 MODEL_PATH = "models/landmark_mnv3.keras"
 IMG_SIZE = (224, 224)
-TEST_DIR = "data/test"
+TEST_DIR = "src/roboflow_dataset/test"
+LABELS_PATH = os.getenv("LANDMARK_LABELS_PATH", "src/roboflow_dataset/labels.txt")
 EXPORT_DIR, REPORTS_DIR = "exports", "reports"
 Path(EXPORT_DIR).mkdir(parents=True, exist_ok=True)
 Path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
@@ -23,7 +24,7 @@ full = keras.models.load_model(MODEL_PATH, compile=False)
 
 # ---- Augment'ı grafikten çıkar: 'aug' sonrasını çekirdek olarak al ----
 aug = full.get_layer("aug")  # eğitimde name="aug" verdik
-core = keras.Model(inputs=aug.output, outputs=full.output, name="inference_core")
+core = keras.Model(inputs=aug.output, outputs=full.output)
 core.trainable = False
 
 # ---- Tüm değişkenlerin yaratıldığından emin olmak için 1 dummy forward ----
@@ -133,6 +134,33 @@ def run_tflite(path, ds, input_is_int8=False):
         yt.append(int(np.argmax(by.numpy(), axis=1)[0]))
         yp.append(int(np.argmax(out, axis=1)[0]))
     return np.array(yt), np.array(yp), np.stack(ps, axis=0)
+
+def _read_labels(p: str) -> list[str]:
+    path = Path(p)
+    if not path.exists():
+        return []
+    out = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        out.append(ln)
+    return out
+
+def load_test_ds():
+    labels = _read_labels(LABELS_PATH)
+    if not labels:
+        raise FileNotFoundError(f"labels.txt not found or empty: {LABELS_PATH}")
+
+    ds = keras.preprocessing.image_dataset_from_directory(
+        TEST_DIR,
+        image_size=IMG_SIZE,
+        batch_size=1,
+        shuffle=False,
+        label_mode="categorical",
+        class_names=labels,  # IMPORTANT: lock class index order
+    )
+    return ds.prefetch(tf.data.AUTOTUNE), ds.class_names
 
 # Test verisini yükle
 test_ds, class_names = load_test_ds()

@@ -97,7 +97,7 @@ public class PredictionController : ControllerBase
 
             _dbContext.PredictionRecords.Add(record);
             await _dbContext.SaveChangesAsync();
-
+            result.PredictionRecordId = record.Id;
             _logger.LogInformation($"Prediction completed in {result.InferenceTimeMs}ms. Top prediction: {result.Predictions[0].Label} ({result.Predictions[0].Confidence:P2}). Saved to DB with ID: {record.Id}");
 
             return Ok(result);

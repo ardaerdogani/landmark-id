@@ -10,6 +10,7 @@ export interface LandmarkPrediction {
 export interface PredictionResult {
   predictions: LandmarkPrediction[];
   inferenceTimeMs: number;
+  predictionRecordId?: number | null;
 }
 
 export interface HistoryRecord {
@@ -23,11 +24,14 @@ export interface HistoryRecord {
 }
 
 export const LANDMARK_NAMES: Record<string, string> = {
-  gediminas_tower: 'Gediminas Tower',
-  vilnius_cathedral: 'Vilnius Cathedral',
-  gate_of_dawn: 'Gate of Dawn',
-  st_anne: "St. Anne's Church",
-  three_crosses: 'Three Crosses Monument',
+  'Trakai_Island_Castle': 'Trakai Island Castle',
+  'Rasos_Cemetery': 'Rasos Cemetery',
+  'Hill_of_Crosses': 'Hill of Crosses',
+  'IX_Fort': 'Ninth Fort',
+  'Gediminas_Tower': 'Gediminas Tower',
+  'Gate_of_Dawn': 'Gate of Dawn',
+  'Uzupis': 'Užupis',
+  'Parnid%C5%BEio_kopa': 'Parnidis Dune',
 };
 
 export const CONFIDENCE_THRESHOLD = 0.55; // Below this is "unsure"

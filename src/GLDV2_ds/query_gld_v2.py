@@ -75,6 +75,57 @@ class GLDQuerier:
         
         return results
 
+    def download_landmark_images(self, landmark_id: int, landmark_name: str, output_dir: str, max_images: int = 50) -> int:
+        """Download actual image files for a landmark"""
+        try:
+            url = GLD_V2_LANDMARK_URL_TEMPLATE.format(landmark_id=landmark_id)
+            response = requests.get(url, timeout=self.timeout)
+            response.raise_for_status()
+            landmark_data = response.json()
+            
+            images = landmark_data.get('images', [])
+            landmark_dir = Path(output_dir) / landmark_name
+            landmark_dir.mkdir(parents=True, exist_ok=True)
+            
+            downloaded = 0
+            for idx, image_info in enumerate(images[:max_images]):
+                image_url = image_info.get('url')
+                if not image_url:
+                    continue
+                
+                try:
+                    img_response = requests.get(image_url, timeout=10)
+                    img_response.raise_for_status()
+                    
+                    img_path = landmark_dir / f"{landmark_name}_{idx}.jpg"
+                    with open(img_path, 'wb') as f:
+                        f.write(img_response.content)
+                    downloaded += 1
+                except Exception as e:
+                    continue
+            
+            return downloaded
+        except Exception:
+            return 0
+        
+    def download_all_landmark_images(self, filtered_landmarks: Dict[str, int], output_dir: str, max_per_landmark: int = 50) -> Dict[str, int]:
+        """Download images for all filtered landmarks"""
+        results = {}
+        
+        for landmark_name, _ in tqdm(filtered_landmarks.items(), desc="Downloading images"):
+            # Get landmark_id from landmarks_data
+            landmark_id = None
+            for landmark_info in self.landmarks_data:
+                if landmark_info.get('name') == landmark_name:
+                    landmark_id = landmark_info.get('id')
+                    break
+            
+            if landmark_id:
+                count = self.download_landmark_images(landmark_id, landmark_name, output_dir, max_per_landmark)
+                results[landmark_name] = count
+        
+        return results
+
 
 # Get top 100 landmarks with max images
 def get_top_landmarks(image_counts: Dict[str, int], top_n: int = 100) -> Tuple[Dict[str, int], int]:
@@ -121,7 +172,10 @@ def main():
     parser = argparse.ArgumentParser(description="Get top N Lithuanian landmarks from GLD v2")
     parser.add_argument("--out-dir", default=str(SCRIPT_DIR / "data"), help="Output directory")
     parser.add_argument("--force-download", action="store_true", help="Force re-download")
-    parser.add_argument("--top-n", type=int, default=100, help="Number of top landmarks")
+    parser.add_argument("--top-n", type=int, default=5, help="Number of top landmarks")
+    parser.add_argument("--download-images", action="store_true", help="Download actual images")
+    parser.add_argument("--images-dir", default=str(SCRIPT_DIR / "data" / "images"), help="Images output directory")
+    parser.add_argument("--max-images-per-landmark", type=int, default=150, help="Max images per landmark")
     
     args = parser.parse_args()
     
@@ -145,6 +199,15 @@ def main():
         sys.exit(1)
     
     save_filtered_labels(top_landmarks, min_count, args.out_dir, len(image_counts))
+    
+    # Download actual images if requested
+    if args.download_images:
+        print("Downloading images...")
+        download_results = querier.download_all_landmark_images(top_landmarks, args.images_dir, args.max_images_per_landmark)
+        print("Download complete:")
+        for landmark, count in download_results.items():
+            print(f"  {landmark}: {count} images")
+    
     print("Saved")
 
 

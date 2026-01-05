@@ -51,10 +51,21 @@ public class PredictionRecord
     /// </summary>
     public float TopConfidence { get; set; }
 
-    /// <summary>
-    /// Detailed predictions (Top-3)
+    public string? WikipediaUrl { get; set; }
+
     /// </summary>
-    public ICollection<PredictionDetail> Predictions { get; set; } = new List<PredictionDetail>();
+    public ICollection<PredictionDetail> Details { get; set; } = new List<PredictionDetail>();
+
+    /// <summary>
+    /// Backwards-compatible alias (some code may use Predictions).
+    /// Not mapped to EF to avoid duplicate navigation mapping.
+    /// </summary>
+    [NotMapped]
+    public ICollection<PredictionDetail> Predictions
+    {
+        get => Details;
+        set => Details = value ?? new List<PredictionDetail>();
+    }
 }
 
 /// <summary>
@@ -83,6 +94,8 @@ public class PredictionDetail
     /// </summary>
     [Required]
     public float Confidence { get; set; }
+
+    public string? WikipediaUrl { get; set; }
 
     /// <summary>
     /// Rank (1, 2, or 3)

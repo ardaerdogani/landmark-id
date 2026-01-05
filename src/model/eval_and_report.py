@@ -4,7 +4,7 @@ from tensorflow import keras
 from sklearn.metrics import confusion_matrix, classification_report
 from pathlib import Path
 
-from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
+# from src.GLDV2_ds.gldv2_dataset import get_tf_datasets
 
 IMG=(224,224); SEED=42; BATCH=32
 test_ds, class_names, sample_count = get_tf_datasets("test", img_size=IMG[0], batch=BATCH, seed=SEED)

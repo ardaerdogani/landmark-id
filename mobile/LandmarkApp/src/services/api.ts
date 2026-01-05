@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { API_ENDPOINTS } from '../constants/config';
 import { PredictionResult, HistoryRecord } from '../types';
+import { API_BASE_URL } from '../constants/config';
+
 
 // Create axios instance with timeout
 const apiClient = axios.create({
@@ -12,31 +14,21 @@ const apiClient = axios.create({
  * @param imageUri - Local file URI from camera/gallery
  * @returns Prediction result with Top-3 predictions
  */
+
 export const predictLandmark = async (imageUri: string): Promise<PredictionResult> => {
-  const formData = new FormData();
+  const form = new FormData();
 
-  // Prepare image for upload
-  const filename = imageUri.split('/').pop() || 'photo.jpg';
-  const match = /\.(\w+)$/.exec(filename);
-  const type = match ? `image/${match[1]}` : 'image/jpeg';
+  const name = imageUri.split('/').pop() || 'photo.jpg';
+  const lower = name.toLowerCase();
+  const type = lower.endsWith('.png') ? 'image/png' : 'image/jpeg';
 
-  formData.append('imageFile', {
-    uri: imageUri,
-    name: filename,
-    type,
-  } as any);
+  form.append('imageFile', { uri: imageUri, name, type } as any);
 
-  const response = await apiClient.post<PredictionResult>(
-    API_ENDPOINTS.PREDICT,
-    formData,
-    {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    }
-  );
+  const res = await apiClient.post(API_ENDPOINTS.PREDICT, form, {
+    headers: { Accept: 'application/json' },
+  });
 
-  return response.data;
+  return res.data;
 };
 
 /**
@@ -67,3 +59,47 @@ export const checkHealth = async (): Promise<boolean> => {
     return false;
   }
 };
+
+export async function sendPredictionFeedback(payload: {
+  predictionRecordId?: number | null;
+  predictedLabel?: string | null;
+  predictedConfidence?: number | null;
+  correctLabel?: string | null;
+  comment?: string | null;
+}) {
+  const res = await fetch(`${API_BASE_URL}/api/Feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Feedback failed (${res.status}): ${text}`);
+  }
+
+  return res.json();
+}
+
+export async function uploadDatasetImage(label: string, imageUri: string) {
+  const form = new FormData();
+  form.append('label', label);
+
+  form.append('imageFile', {
+    uri: imageUri,
+    name: 'photo.jpg',
+    type: 'image/jpeg',
+  } as any);
+
+  const res = await fetch(API_ENDPOINTS.DATASET_ADD, {
+    method: 'POST',
+    body: form,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Upload failed (${res.status}): ${text}`);
+  }
+
+  return res.json();
+}

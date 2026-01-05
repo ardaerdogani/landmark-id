@@ -19,8 +19,22 @@ class SplitCreator:
         self.out_dir.mkdir(parents=True, exist_ok=True)
     
     def load_metadata(self, metadata_file: str) -> Dict[str, List[Dict]]:
-        with open(metadata_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        with open(metadata_file, 'r') as f:
+            data = json.load(f)
+        
+        # If data is a list, convert to dict
+        if isinstance(data, list):
+            metadata = {}
+            for item in data:
+                landmark = item.get('landmark_name')
+                if landmark:
+                    if landmark not in metadata:
+                        metadata[landmark] = []
+                    metadata[landmark].append(item)
+            return metadata
+        
+        # If already a dict, return as is
+        return data
     
     # Create train/val/test split .txt files
     def create_split_files(self, metadata: Dict[str, List[Dict]], train_ratio: float = 0.7, val_ratio: float = 0.15) -> Tuple[int, int, int]:

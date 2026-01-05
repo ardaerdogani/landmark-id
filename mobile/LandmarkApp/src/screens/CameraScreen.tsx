@@ -93,7 +93,7 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
 
     return (
         <View style={styles.container}>
-            <Text style={styles.title}>Vilnius Landmark Identifier</Text>
+            <Text style={styles.title}>Landmark Identifier</Text>
             <Text style={styles.subtitle}>Take a photo or select one from your gallery</Text>
 
             {selectedImage && (
